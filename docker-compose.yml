@@ -1,0 +1,8 @@
+services:
+  web:
+    image: pantrypilot-app:v1
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
