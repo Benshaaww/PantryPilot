@@ -44,7 +44,7 @@ def search_recipes(theme: str) -> str:
 
 # --- Agent System Prompt ---
 
-SYSTEM_PROMPT = """You are "PantryPilot," a warm, conversational, and helpful family grocery assistant. 
+SYSTEM_PROMPT = """You are PantryPilot. You communicate via clear, numbered text lists. You are fast, concise, and never describe your own internal processes. You must NEVER hallucinate or attempt to generate "buttons" or interactive UI elements.
 You proactively manage the family's pantry, household supplies, and grocery needs.
 You receive direct messages or audio transcriptions from family members via WhatsApp.
 
@@ -106,20 +106,33 @@ async def process_user_intent(message: str, user_name: str = "Unknown", user_rol
     logger.info(f"Processing user intent for message: {message} (User: {user_name}, Role: {user_role})")
     print(f"\n[TRACE] household_agent.process_user_intent starting for: '{message}' [TRACE]")
     try:
-        agent_graph = create_household_agent(user_name, user_role)
+        dynamic_prompt = SYSTEM_PROMPT + f"\n\n--- USER CONTEXT ---\nThe current user is {user_name}, role: {user_role.upper()}."
+        if user_role.lower() == "requester":
+            dynamic_prompt += "\nThis user is a Requester and CANNOT authorize checkouts. If they try to checkout, DO NOT classify as checkout_sixty60."
+
         structured_llm = ChatOpenAI(model="gpt-4o", temperature=0.0).with_structured_output(HouseholdIntentPayload)
         
-        # Async invocation with LangGraph message state
-        print(f"[TRACE] Invoking LangGraph agent... [TRACE]")
+        # 1. Single-Pass Fast Router
+        print(f"[TRACE] Invoking structured LLM for Single-Pass Routing... [TRACE]")
+        fast_prompt = f"{dynamic_prompt}\n\nOriginal user message: '{message}'\nExtract the requested struct."
+        fast_result = await structured_llm.ainvoke(fast_prompt)
+        
+        # If the intent doesn't require tools, return immediately to eliminate latency!
+        if fast_result.intent in [IntentType.CHIT_CHAT, IntentType.READ_LIST, IntentType.CHECKOUT_SIXTY60, IntentType.SETTINGS]:
+            print(f"[TRACE] Fast single-pass completed for intent: {fast_result.intent} [TRACE]")
+            return fast_result
+            
+        # 2. Complex Intent Pipeline (Needs LangGraph Tools)
+        print(f"[TRACE] Intent requires tools. Invoking LangGraph agent... [TRACE]")
+        agent_graph = create_household_agent(user_name, user_role)
         inputs = {"messages": [{"role": "user", "content": message}]}
         agent_response = await agent_graph.ainvoke(inputs)
-        print(f"[TRACE] LangGraph agent responded! [TRACE]")
         
         # Extract the final AI message content holding tool context
         tool_gathered_context = agent_response["messages"][-1].content
         
-        print(f"[TRACE] Invoking structured LLM for final extraction... [TRACE]")
-        final_prompt = f"Original user message: '{message}'\nContext gathered by tools: '{tool_gathered_context}'\nExtract the requested struct."
+        print(f"[TRACE] Invoking structured LLM for final tool-augmented extraction... [TRACE]")
+        final_prompt = f"{dynamic_prompt}\n\nOriginal user message: '{message}'\nContext gathered by tools: '{tool_gathered_context}'\nExtract the requested struct."
         result = await structured_llm.ainvoke(final_prompt)
         print(f"[TRACE] Structured LLM extracted result! [TRACE]")
         
