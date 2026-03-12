@@ -53,6 +53,9 @@ async def send_interactive_buttons(to_number: str, text_body: str, buttons: list
     Sends an interactive message with up to 3 buttons via Meta's Graph API.
     `buttons` should be a list of dicts: [{"id": "btn_1", "title": "Option 1"}, ...]
     """
+    # 1. Persona Update
+    text_body = f"{text_body}\n\nPlease tap a button below or type the number of your choice."
+
     try:
         token = os.getenv("WHATSAPP_API_TOKEN")
         phone_id = os.getenv("WHATSAPP_PHONE_ID")
@@ -72,12 +75,14 @@ async def send_interactive_buttons(to_number: str, text_body: str, buttons: list
             for b in buttons[:3] # Meta limits to 3 buttons max
         ]
         
+        # 2. Strict Meta Schema compliance (including a header)
         payload = {
             "messaging_product": "whatsapp",
             "to": to_number,
             "type": "interactive",
             "interactive": {
                 "type": "button",
+                "header": {"type": "text", "text": "🤖 PantryPilot Options"},
                 "body": {"text": text_body},
                 "action": {
                     "buttons": formatted_buttons
@@ -92,8 +97,15 @@ async def send_interactive_buttons(to_number: str, text_body: str, buttons: list
             return True
             
     except Exception as e:
-        logger.error(f"Failed to send interactive buttons: {e}")
-        print(f"[ERROR] Failed to send interactive buttons: {e}")
+        logger.error(f"Failed to send interactive buttons: {e}. Falling back to text list.")
+        print(f"[ERROR] Failed to send interactive buttons: {e}. Sending fallback text.")
+        
+        # 3. Fallback Logic: Numbered text list if buttons fail
+        fallback_text = f"{text_body}\n"
+        for i, b in enumerate(buttons[:3], 1):
+            fallback_text += f"\n{i}. {b['title']}"
+            
+        await send_whatsapp_message(to_number, fallback_text)
         return False
 
 # -- Emoji constants (real UTF-8 chars, safe for JSON/httpx) --
@@ -522,9 +534,27 @@ async def process_text_message(phone_number: str, text: str):
     logger.info(f"Processing text message from {phone_number}: {text}")
     print(f"\n[TRACE] whatsapp_service.process_text_message received text: '{text}' [TRACE]")
     
-    # Check if they are in the "join family" flow
     state = _onboarding_state.get(phone_number)
+    text_stripped = text.strip()
     
+    # --- Numeric Fallback Router ---
+    if text_stripped in ["1", "2", "3"]:
+        if state == "pending_setup_type":
+            mapping = {"1": "onboard_family", "2": "onboard_single", "3": "onboard_join"}
+            if text_stripped in mapping:
+                await process_interactive_message(phone_number, mapping[text_stripped])
+                return
+        elif state == "pending_role":
+            mapping = {"1": "role_parent", "2": "role_child"}
+            if text_stripped in mapping:
+                await process_interactive_message(phone_number, mapping[text_stripped])
+                return
+        elif phone_number in _staging_buffer:
+            mapping = {"1": "commit_pending", "2": "clear_pending"}
+            if text_stripped in mapping:
+                await process_interactive_message(phone_number, mapping[text_stripped])
+                return
+
     # Check for Deep Link pattern
     text_lower = text.strip().lower()
     if text_lower.startswith("join family code:"):
