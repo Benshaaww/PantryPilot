@@ -370,30 +370,33 @@ async def process_interactive_message(phone_number: str, payload_id: str):
             user = await user_repo.get_user(phone_number)
             requester_name = user.name if user else "System"
             
-            saved_names = []
-            for item in items_to_save:
-                # Build a temporary GroceryItem object to match the repository signature
-                from schemas.intent_schemas import GroceryItem
-                item_obj = GroceryItem(
-                    item_name=item["item_name"],
-                    quantity=item.get("quantity", "1"),
-                    category=item.get("category", "Other"),
-                    urgency=item.get("urgency", "Normal")
-                )
-                
-                saved = await grocery_repo.add_or_update_item(
-                    item=item_obj,
-                    family_id=user.family_id,
-                    requested_by=requester_name
-                )
-                if saved is not False:
-                    saved_names.append(item["item_name"])
+            # --- Async Priority (Snappy Protocol) ---
+            # Send confirmation FIRST, then do DB writes in the background.
+            saved_names = [item["item_name"] for item in items_to_save]
+            confirmation = _build_confirmation_message("Staged items committed", saved_names)
+            await send_whatsapp_message(phone_number, confirmation)
             
             del _staging_buffer[phone_number]
             
-            # Send standard confirmation
-            confirmation = _build_confirmation_message("Staged items committed", saved_names)
-            await send_whatsapp_message(phone_number, confirmation)
+            # Background DB writes
+            import asyncio
+            async def _bg_save():
+                for item in items_to_save:
+                    from schemas.intent_schemas import GroceryItem
+                    item_obj = GroceryItem(
+                        item_name=item["item_name"],
+                        quantity=item.get("quantity", "1"),
+                        category=item.get("category", "Other"),
+                        urgency=item.get("urgency", "Normal")
+                    )
+                    await grocery_repo.add_or_update_item(
+                        item=item_obj,
+                        family_id=user.family_id,
+                        requested_by=requester_name
+                    )
+            
+            asyncio.create_task(_bg_save())
+            
         else:
             await send_whatsapp_message(phone_number, "⚠️ I couldn't find any pending items to confirm. Try sending them again!")
         return
@@ -538,28 +541,22 @@ async def process_text_message(phone_number: str, text: str):
     if not user:
         return # Handled by onboarding flow
         
-    # --- Status Command ---
-    if text.strip().lower() == "status":
-        family_id = getattr(user, 'family_id', None)
-        
-        if not family_id:
-            status_msg = "🏠 Family ID: Not Linked (Type 'Join Family' to start)"
-        else:
-            pending_items = await grocery_repo.get_pending_items(family_id)
-            staged_items = _staging_buffer.get(phone_number, [])
-            status_msg = (
-                f"🏠 Family ID: {family_id}\n"
-                f"👤 Role: {user.role.value.capitalize()}\n"
-                f"📦 Staged Items: {len(staged_items)}\n"
-                f"🛒 Current List: {len(pending_items)}\n"
-                f"💡 Tip: Try sending a voice note or a photo of your fridge!"
-            )
-        await send_whatsapp_message(phone_number, status_msg)
-        return
+    import asyncio
+    # Create the task for Intent Engine
+    intent_task = asyncio.create_task(household_agent.process_user_intent(text))
     
-    # Send natural language to the Intent Engine
-    # TODO: Update agent to receive user context
-    intent_payload = await household_agent.process_user_intent(text)
+    # Wait for the task to finish or timeout after 4 seconds
+    done, pending = await asyncio.wait([intent_task], timeout=4.0)
+    
+    if pending:
+        # Fallback fired because it took too long
+        print(f"[TRACE] Agent taking longer than 4s... Sending thinking message! [TRACE]")
+        await send_whatsapp_message(phone_number, "I'm thinking! Give me one second...")
+        # Now await the actual result
+        intent_payload = await intent_task
+    else:
+        # Completed within 4 seconds
+        intent_payload = intent_task.result()
     
     if intent_payload:
         logger.info(f"Agent classified intent: {intent_payload.intent.value} | {intent_payload.summary}")
@@ -570,8 +567,7 @@ async def process_text_message(phone_number: str, text: str):
         print(f"[TRACE] Agent failed to parse intent, returned None! [TRACE]")
         await send_whatsapp_message(
             phone_number,
-            f"{EMOJI_THINK} Hmm, I couldn't quite figure that one out. "
-            f"Could you rephrase it or send the items one more time?"
+            "I'm a bit lost—are we adding items to your list, or just chatting?"
         )
 
 async def _download_media_from_meta(media_id: str) -> bytes:
