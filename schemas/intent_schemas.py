@@ -1,5 +1,15 @@
+from enum import Enum
 from pydantic import BaseModel, Field
 from typing import List, Optional
+
+
+class IntentType(str, Enum):
+    """The classified intent type for incoming user messages."""
+    ADD_ITEMS = "add_items"
+    READ_LIST = "read_list"
+    CHECKOUT_SIXTY60 = "checkout_sixty60"
+    RECOMMEND_RECIPES = "recommend_recipes"
+    SETTINGS = "settings"
 
 class GroceryItem(BaseModel):
     """Represents a single grocery item to be added to the database."""
@@ -22,6 +32,7 @@ class CalendarEventPrediction(BaseModel):
 
 class HouseholdIntentPayload(BaseModel):
     """The root payload returned by the LangChain ReAct agent."""
+    intent: IntentType = Field(description="The classified intent: 'add_items', 'read_list', or 'checkout_sixty60'.")
     summary: str = Field(description="A brief summary of what the agent understood and decided to do.")
     standard_groceries: Optional[List[GroceryItem]] = Field(default=None, description="Directly requested grocery items.")
     recipe_extractions: Optional[List[RecipeIngredients]] = Field(default=None, description="Ingredients extracted from provided URLs.")

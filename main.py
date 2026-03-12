@@ -24,7 +24,7 @@ app = FastAPI(
 )
 
 # Include routers
-app.include_router(webhook_router, prefix="/api", tags=["Webhook"])
+app.include_router(webhook_router, tags=["Webhook"])
 app.include_router(admin_router, prefix="/api", tags=["Admin Command"])
 
 scheduler = AsyncIOScheduler()

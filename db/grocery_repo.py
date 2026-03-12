@@ -18,29 +18,37 @@ def parse_quantity_to_number(quantity_str: str) -> float:
             pass
     return 1.0
 
-async def add_or_update_item(item: GroceryItem):
+async def add_or_update_item(item: GroceryItem, family_id: str, requested_by: str = "System"):
     """
     Core deduplication logic targeting MongoDB.
     Uses update_one with $inc and upsert=True.
+    Stores who requested the item, scoped to a specific family_id.
     """
+    if not family_id:
+        logger.error("Attempted to add item without a family_id!")
+        return
+        
     try:
         db = await get_database()
         collection = db[COLLECTION_NAME]
         
         inc_amount = parse_quantity_to_number(item.quantity)
         
-        logger.info(f"Adding or updating item: {item.item_name} with inc_amount {inc_amount}")
+        logger.info(f"Adding or updating item: {item.item_name} for family {family_id} with inc_amount {inc_amount}")
         
         await collection.update_one(
-            {"item_name": item.item_name, "status": "pending"},
+            {"item_name": item.item_name, "status": "pending", "family_id": family_id},
             {
                 "$inc": {"quantity_count": inc_amount},
                 "$setOnInsert": {
-                    "original_quantity_text": item.quantity
+                    "original_quantity_text": item.quantity,
+                    "requested_by": requested_by,
+                    "family_id": family_id
                 },
                 "$set": {
                     "category": item.category,
-                    "urgency": item.urgency
+                    "urgency": item.urgency,
+                    "requested_by": requested_by
                 }
             },
             upsert=True
@@ -48,15 +56,15 @@ async def add_or_update_item(item: GroceryItem):
     except Exception as e:
         logger.error(f"Database error in add_or_update_item for {item.item_name}: {e}")
 
-async def get_pending_items() -> list:
+async def get_pending_items(family_id: str) -> list:
     """
-    Fetches all documents marked as 'pending'.
+    Fetches all documents marked as 'pending' for a specific family.
     """
     try:
         db = await get_database()
         collection = db[COLLECTION_NAME]
         
-        cursor = collection.find({"status": "pending"})
+        cursor = collection.find({"status": "pending", "family_id": family_id})
         items = await cursor.to_list(length=None)
         
         for item in items:

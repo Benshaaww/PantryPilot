@@ -30,6 +30,7 @@ async def process_webhook_payload(payload: WhatsAppWebhookPayload):
     """
     print("\n[ALARM] WEBHOOK ENDPOINT HIT! [ALARM]")
     print(f"Raw Parsed Payload: {payload}\n")
+    phone_number = None
     try:
         for entry in payload.entry:
             for change in entry.changes:
@@ -56,10 +57,24 @@ async def process_webhook_payload(payload: WhatsAppWebhookPayload):
                                 image_id=message.image.id,
                                 mime_type=message.image.mime_type
                             )
+                        elif msg_type == "interactive" and message.interactive:
+                            if message.interactive.type == "button_reply" and message.interactive.button_reply:
+                                await whatsapp_service.process_interactive_message(
+                                    phone_number=phone_number,
+                                    payload_id=message.interactive.button_reply.id
+                                )
                         else:
                             logger.info(f"Received unhandled message type: {msg_type}")
     except Exception as e:
-        logger.error(f"Error processing webhook payload: {e}")
+        logger.error(f"Error processing webhook payload: {e}", exc_info=True)
+        if phone_number:
+            try:
+                await whatsapp_service.send_whatsapp_message(
+                    phone_number,
+                    "🔧 PantryPilot is stretching its gears! I hit a small snag processing that. Could you try again or type 'Help'?"
+                )
+            except Exception as nested_e:
+                logger.error(f"Failed to send fallback error message: {nested_e}")
 
 @router.post("/webhook")
 async def handle_webhook(payload: WhatsAppWebhookPayload, background_tasks: BackgroundTasks):

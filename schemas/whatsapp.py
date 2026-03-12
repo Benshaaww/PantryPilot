@@ -18,6 +18,16 @@ class AudioMessage(BaseModel):
     id: str
     voice: Optional[bool] = False
 
+class ButtonReply(BaseModel):
+    """Represents the payload of an interactive button click."""
+    id: str
+    title: str
+
+class InteractiveMessage(BaseModel):
+    """Represents an interactive message payload."""
+    type: str  # e.g., 'button_reply'
+    button_reply: Optional[ButtonReply] = None
+
 class Message(BaseModel):
     """Represents a single WhatsApp message from a user."""
     from_: str = Field(alias="from", description="The sender's WhatsApp ID/phone number")
@@ -27,6 +37,7 @@ class Message(BaseModel):
     text: Optional[TextMessage] = None
     image: Optional[ImageMessage] = None
     audio: Optional[AudioMessage] = None
+    interactive: Optional[InteractiveMessage] = None
 
 class Profile(BaseModel):
     """Represents the profile information of the sender."""
