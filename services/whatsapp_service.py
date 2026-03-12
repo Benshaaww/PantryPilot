@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 async def send_whatsapp_message(to_number: str, message: str):
     """
     Sends an outbound WhatsApp message using Meta's Graph API.
+    Persists outbound message to user context.
     """
     try:
         token = os.getenv("WHATSAPP_API_TOKEN")
@@ -38,17 +39,107 @@ async def send_whatsapp_message(to_number: str, message: str):
         }
         
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, json=payload, timeout=10.0)
+            # MODULE 2: Timeout & Deadlock Prevention
+            response = await client.post(url, headers=headers, json=payload, timeout=5.0)
             response.raise_for_status()
-            logger.info(f"Successfully sent WhatsApp message to {to_number}")
-            return True
+            
+        # MODULE 1: Anti-Goldfish Memory (Outbound)
+        await user_repo.update_user_history(to_number, "assistant", message)
+        
+        logger.info(f"Successfully sent WhatsApp message to {to_number}")
+        return True
             
     except Exception as e:
         logger.error(f"Failed to send outbound WhatsApp message: {e}")
         print(f"[ERROR] Failed to send outbound WhatsApp message: {e}")
         return False
 
+async def send_interactive_menu(to_number: str, text: str, buttons: list[dict]):
+    """
+    Sends an interactive WhatsApp message with up to 3 buttons.
+    Each button must have 'id' and 'title' (max 20 chars).
+    MODULE 3: Auto-Fallback System (CRITICAL)
+    """
+    try:
+        token = os.getenv("WHATSAPP_API_TOKEN")
+        phone_id = os.getenv("WHATSAPP_PHONE_ID")
+        
+        if not token or not phone_id:
+            logger.error("Missing WHATSAPP_API_TOKEN or WHATSAPP_PHONE_ID for outbound interactive message.")
+            return False
+            
+        url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Format the buttons as per Meta schema
+        action_buttons = []
+        for btn in buttons[:3]: # Enforce max 3
+            action_buttons.append({
+                "type": "reply",
+                "reply": {
+                    "id": btn["id"],
+                    "title": btn["title"][:20]  # Enforce max 20 chars
+                }
+            })
+            
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to_number,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {
+                    "text": text
+                },
+                "action": {
+                    "buttons": action_buttons
+                }
+            }
+        }
+        
+        async with httpx.AsyncClient() as client:
+            # MODULE 2: Timeout & Deadlock Prevention
+            response = await client.post(url, headers=headers, json=payload, timeout=5.0)
+            
+            # MODULE 3: Handle API rejection (e.g. 400 Bad Request Sandbox/Schema error)
+            if response.status_code == 400:
+                logger.warning(f"Interactive UI rejected by Meta (400). Falling back to text list for {to_number}.")
+                raise httpx.HTTPStatusError("Button payload rejected", request=response.request, response=response)
+                
+            response.raise_for_status()
+            
+        # MODULE 1: Anti-Goldfish Memory (Outbound)
+        # Note: We store the text part of the interactive menu
+        await user_repo.update_user_history(to_number, "assistant", f"[Menu] {text}")
+        
+        logger.info(f"Successfully sent Interactive Menu to {to_number}")
+        return True
+            
+    except (httpx.HTTPStatusError, Exception) as e:
+        logger.error(f"Interactive UI failed, triggering Auto-Fallback: {e}")
+        # MODULE 3: Auto-Fallback System
+        fallback_text = text + "\n\n"
+        for i, btn in enumerate(buttons[:3], 1):
+            fallback_text += f"{i}. {btn['title']}\n"
+        fallback_text += "\n_Type the number or title of your choice._"
+        
+        return await send_whatsapp_message(to_number, fallback_text)
 
+async def _send_standard_menu(phone_number: str):
+    """
+    MODULE 3: Core Menu Implementation
+    Exactly: [1] "View My List" [2] "Edit My List" [3] "Order Checkers"
+    """
+    buttons = [
+        {"id": "btn_view_list", "title": "View My List"},
+        {"id": "btn_edit_list", "title": "Edit My List"},
+        {"id": "btn_order_6060", "title": "Order Checkers"}
+    ]
+    await send_interactive_menu(phone_number, "What would you like to do next?", buttons)
 
 # -- Emoji constants (real UTF-8 chars, safe for JSON/httpx) --
 EMOJI_CART = "\U0001F6D2"       # shopping cart
@@ -374,12 +465,12 @@ async def check_user_or_onboard(phone_number: str, text: str = "") -> User | Non
             
     # New unrecognized number -> Start Onboarding Step 1
     _onboarding_state[phone_number] = "pending_setup_type"
-    welcome_msg = (
-        "🚀 Welcome to PantryPilot! I'm your AI grocery assistant. To get started, please reply with the number of your household type:\n\n"
-        "1 - Single Household\n"
-        "2 - Family Household"
-    )
-    await send_whatsapp_message(phone_number, welcome_msg)
+    welcome_msg = "🚀 Welcome to PantryPilot! I'm your AI grocery assistant. To get started, please select your household type:"
+    buttons = [
+        {"id": "onboard_single", "title": "Single Household"},
+        {"id": "onboard_family", "title": "Family Household"}
+    ]
+    await send_interactive_menu(phone_number, welcome_msg, buttons)
     return None
 
 def _get_god_tier_success_msg() -> str:
@@ -394,10 +485,45 @@ def _get_god_tier_success_msg() -> str:
 
 async def process_interactive_message(phone_number: str, payload_id: str):
     """
-    Handles interactive button replies for the onboarding flow.
+    Handles interactive button replies.
     """
     logger.info(f"Received interactive button reply from {phone_number}: {payload_id}")
     
+    # --- Standard Menu Fallbacks ---
+    if payload_id == "btn_view_list":
+        user = await user_repo.get_user(phone_number)
+        if user:
+            pending_items = await grocery_repo.get_pending_items(user.family_id)
+            msg = _build_grocery_list_message(pending_items)
+            await send_whatsapp_message(phone_number, msg)
+            await _send_standard_menu(phone_number)
+        return
+        
+    if payload_id == "btn_edit_list":
+        await send_whatsapp_message(phone_number, "To edit, simply tell me what to remove (e.g., 'Remove apples').")
+        return
+        
+    if payload_id == "btn_order_6060":
+        user = await user_repo.get_user(phone_number)
+        if user:
+            pending_items = await grocery_repo.get_pending_items(user.family_id)
+            if not pending_items:
+                await send_whatsapp_message(phone_number, "Your list is empty! Add items first.")
+                await _send_standard_menu(phone_number)
+                return
+            
+            # MODULE 5: THE CHECKERS SIXTY60 OPTIMIZATION
+            # 1. Alphabetical sorting
+            sorted_items = sorted(pending_items, key=lambda x: x['item_name'].lower())
+            
+            header = "🚀 *Ready for Checkers Sixty60!*\n"
+            body = "\n".join([f"🛒 ✅ {item['item_name']} (x{item.get('quantity_count', 1)})" for item in sorted_items])
+            footer = "\n\n_Checkers doesn't allow automatic cart syncing, so keep this list handy while you shop in their app!_"
+            
+            await send_whatsapp_message(phone_number, header + body + footer)
+            await _send_standard_menu(phone_number)
+        return
+
     # --- State Protection ---
     existing_user = await user_repo.get_user(phone_number)
     if existing_user and payload_id in ["onboard_family", "onboard_single", "onboard_join", "role_parent", "role_child"]:
@@ -465,12 +591,12 @@ async def process_interactive_message(phone_number: str, payload_id: str):
         if payload_id == "onboard_family":
             # Ask for role
             _onboarding_state[phone_number] = "pending_role"
-            msg = (
-                "🏡 *Family Setup*\nWill you be managing the checkouts, or just requesting items?\n\n"
-                "1 - 💳 Parent (Buyer)\n"
-                "2 - 📱 Child (Requester)"
-            )
-            await send_whatsapp_message(phone_number, msg)
+            msg = "🏡 *Family Setup*\nWill you be managing the checkouts, or just requesting items?"
+            buttons = [
+                {"id": "role_parent", "title": "Buy/Manage"},
+                {"id": "role_child", "title": "Just Request"}
+            ]
+            await send_interactive_menu(phone_number, msg, buttons)
             return
             
         elif payload_id == "onboard_single":
@@ -520,24 +646,19 @@ async def process_text_message(phone_number: str, text: str):
     logger.info(f"Processing text message from {phone_number}: {text}")
     print(f"\n[TRACE] whatsapp_service.process_text_message received text: '{text}' [TRACE]")
     
+    # --- MODULE 1: Anti-Goldfish Memory (Inbound) ---
+    await user_repo.update_user_history(phone_number, "user", text)
+    
     state = _onboarding_state.get(phone_number)
     text_stripped = text.strip()
     
-    # --- Strict State Gating & Numeric Fallback Router ---
-    if state == "pending_setup_type":
-        if text_stripped in ["1", "2"]:
-            mapping = {"1": "onboard_single", "2": "onboard_family"}
-            await process_interactive_message(phone_number, mapping[text_stripped])
-        else:
-            await send_whatsapp_message(phone_number, "I'm using text-based menus for maximum speed! Just type the number '1' or '2'.")
-        return
-        
-    elif state == "pending_role":
-        if text_stripped in ["1", "2"]:
-            mapping = {"1": "role_parent", "2": "role_child"}
-            await process_interactive_message(phone_number, mapping[text_stripped])
-        else:
-            await send_whatsapp_message(phone_number, "I'm using text-based menus for maximum speed! Just type the number '1' or '2'.")
+    # --- MODULE 2: The 2-Strike Rule (State Loop Killer) ---
+    # If we are in a fallback loop, reset everything.
+    # Note: _routing_failures logic is updated below in fallback block.
+    
+    # --- Strict State Gating ---
+    if state in ["pending_setup_type", "pending_role"]:
+        await send_whatsapp_message(phone_number, "Please tap one of the buttons I just sent you to continue setup!")
         return
         
     if phone_number in _staging_buffer:
@@ -611,7 +732,7 @@ async def process_text_message(phone_number: str, text: str):
         
     import asyncio
     # Create the task for Intent Engine
-    intent_task = asyncio.create_task(household_agent.process_user_intent(text, user.name, user.role.value))
+    intent_task = asyncio.create_task(household_agent.process_user_intent(text, user.name, user.role.value, user.chat_history))
     
     # Wait for the task to finish or timeout after 4 seconds
     done, pending = await asyncio.wait([intent_task], timeout=4.0)
@@ -640,21 +761,22 @@ async def process_text_message(phone_number: str, text: str):
         logger.warning(f"Agent failed to parse intent for message: {text}")
         print(f"[TRACE] Agent failed to parse intent, returned None! [TRACE]")
         
-        # --- Kill the Infinite Loop ---
+        # --- MODULE 2: The 2-Strike Rule (State Loop Killer) ---
         failures = _routing_failures.get(phone_number, 0) + 1
         _routing_failures[phone_number] = failures
         
         if failures >= 2:
-            print(f"[TRACE] Failures hit {failures}! Forcing State Reset to General Chat. [TRACE]")
-            # 2 Strikes! Reset states and force chat
+            print(f"[TRACE] failures hit {failures}! Forcing State Reset to Standard Menu. [TRACE]")
+            # 2 strikes! Reset states
             _routing_failures[phone_number] = 0
             if phone_number in _onboarding_state:
                 del _onboarding_state[phone_number]
             if phone_number in _staging_buffer:
                 del _staging_buffer[phone_number]
-                
-            intent_payload = HouseholdIntentPayload(intent=IntentType.CHIT_CHAT, summary=text)
-            await _route_intent(phone_number, intent_payload, user)
+            
+            # Exact Spec Message
+            await send_whatsapp_message(phone_number, "I got a bit tangled up there! Let's start fresh. 🌪️")
+            await _send_standard_menu(phone_number)
         else:
             await send_whatsapp_message(
                 phone_number,

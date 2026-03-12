@@ -45,17 +45,11 @@ async def process_webhook_payload(payload: WhatsAppWebhookPayload):
                                 phone_number=phone_number,
                                 text=message.text.body
                             )
-                        elif msg_type == "audio" and message.audio:
-                            await whatsapp_service.process_audio_message(
-                                phone_number=phone_number,
-                                audio_id=message.audio.id,
-                                mime_type=message.audio.mime_type
-                            )
-                        elif msg_type == "image" and message.image:
-                            await whatsapp_service.process_image_message(
-                                phone_number=phone_number,
-                                image_id=message.image.id,
-                                mime_type=message.image.mime_type
+                        elif msg_type in ["audio", "image", "sticker"]:
+                            # MODULE 4: Unsupported Media Bypass
+                            await whatsapp_service.send_whatsapp_message(
+                                phone_number,
+                                "I'm still learning to process media! For now, please type out your grocery requests."
                             )
                         elif msg_type == "interactive" and message.interactive:
                             if message.interactive.type == "button_reply" and message.interactive.button_reply:

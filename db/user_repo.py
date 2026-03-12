@@ -22,7 +22,8 @@ async def get_user(phone_number: str) -> User | None:
                 role=UserRole(user_doc["role"]),
                 family_id=user_doc.get("family_id"),
                 reminder_day=user_doc.get("reminder_day"),
-                notification_enabled=user_doc.get("notification_enabled", False)
+                notification_enabled=user_doc.get("notification_enabled", False),
+                chat_history=user_doc.get("chat_history", [])
             )
         return None
     except Exception as e:
@@ -98,5 +99,28 @@ async def update_user_settings(phone_number: str, reminder_day: str, enabled: bo
             return True
         return False
     except Exception as e:
-        logger.error(f"Error updating settings for user {phone_number}: {e}")
         return False
+
+async def update_user_history(phone_number: str, role: str, content: str):
+    """
+    Appends a message to the user's chat history.
+    Keeps only the last 6 messages (3 turns).
+    """
+    try:
+        db = await get_database()
+        collection = db[COLLECTION_NAME]
+        
+        # Add new message and slice to last 6
+        await collection.update_one(
+            {"phone_number": phone_number},
+            {
+                "$push": {
+                    "chat_history": {
+                        "$each": [{"role": role, "content": content}],
+                        "$slice": -6
+                    }
+                }
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error updating chat history for {phone_number}: {e}")

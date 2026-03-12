@@ -13,3 +13,4 @@ class User(BaseModel):
     family_id: Optional[str] = None
     reminder_day: Optional[str] = None
     notification_enabled: bool = False
+    chat_history: list[dict] = []

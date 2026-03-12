@@ -81,18 +81,28 @@ Set the "intent" field accordingly in your response.
 3. If a shared URL is detected, use the 'extract_recipe_from_url' tool to read the recipe. Then, extract the ingredients needed.
 4. If they mention upcoming events (e.g., "guests this weekend"), use the 'check_upcoming_events' tool to see the context, then predict the groceries or supplies needed.
 5. You MUST prepend a contextually accurate emoji to every single extracted grocery item name (e.g., "🥛 Milk", "🥚 Eggs"). If an item doesn't have an obvious matching emoji, you MUST default to the shopping cart emoji ("🛒 ").
-6. Typo Tolerance: The extraction logic must be fuzzy. If a user says "milf" or "milo", you must use contextual reasoning to identify the actual intended grocery item (e.g., "🥛 Milk").
+6. **Typo Tolerance & Correction**: You must be highly tolerant of poor spelling. "Aples," "chkcen," "sndwiches," "bananas," etc. must be corrected to their proper spelling before extraction. 
+7. **Contextual Resolution**: If the user says "Yes", "Add it", or repeats an item from the history, resolve it against the preceding turn to determine what they are confirming or asking for.
 
 You MUST always return a structured JSON object matching the `HouseholdIntentPayload` schema.
 Think step-by-step. Use the provided tools if you need missing context. 
 """
 
-def create_household_agent(user_name: str, user_role: str):
-    """Initializes the modern LangChain Agent Graph."""
+def create_household_agent(user_name: str, user_role: str, chat_history: list[dict] = []):
+    """Initializes the modern LangChain Agent Graph with contextual history."""
     llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
     tools = [check_upcoming_events, extract_recipe_from_url, search_recipes]
     
+    # MODULE 1: Contextual Resolution
+    history_context = "\n--- CONTEXT: LAST 3 TURNS ---\n"
+    for msg in chat_history:
+        role = msg.get("role", "user").upper()
+        content = msg.get("content", "")
+        history_context += f"{role}: {content}\n"
+    
     dynamic_prompt = SYSTEM_PROMPT + f"\n\n--- USER CONTEXT ---\nThe current user is {user_name}, role: {user_role.upper()}."
+    dynamic_prompt += history_context
+    
     if user_role.lower() == "requester":
         dynamic_prompt += "\nThis user is a Requester and CANNOT authorize checkouts. If they try to checkout, DO NOT classify as checkout_sixty60 (fallback to chat or a polite decline, or let the router catch it)."
         
@@ -103,14 +113,22 @@ def create_household_agent(user_name: str, user_role: str):
     )
     return agent_graph
 
-async def process_user_intent(message: str, user_name: str = "Unknown", user_role: str = "requester") -> Optional[HouseholdIntentPayload]:
+async def process_user_intent(message: str, user_name: str = "Unknown", user_role: str = "requester", chat_history: list[dict] = []) -> Optional[HouseholdIntentPayload]:
     """The main entrypoint for the Intent Engine using async invocation."""
     logger.info(f"Processing user intent for message: {message} (User: {user_name}, Role: {user_role})")
     print(f"\n[TRACE] household_agent.process_user_intent starting for: '{message}' [TRACE]")
+    import asyncio
+    
     try:
+        # MODULE 1: Build combined context
+        history_context = "\n--- CONTEXT: LAST 3 TURNS ---\n"
+        for msg in chat_history:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")
+            history_context += f"{role}: {content}\n"
+
         dynamic_prompt = SYSTEM_PROMPT + f"\n\n--- USER CONTEXT ---\nThe current user is {user_name}, role: {user_role.upper()}."
-        if user_role.lower() == "requester":
-            dynamic_prompt += "\nThis user is a Requester and CANNOT authorize checkouts. If they try to checkout, DO NOT classify as checkout_sixty60."
+        dynamic_prompt += history_context
 
         llm_raw = ChatOpenAI(model="gpt-4o", temperature=0.0)
         structured_llm = llm_raw.with_structured_output(HouseholdIntentPayload)
@@ -119,43 +137,53 @@ async def process_user_intent(message: str, user_name: str = "Unknown", user_rol
         print(f"[TRACE] Invoking Tier 2 String-Only LLM Router... [TRACE]")
         tier2_prompt = (
             "You are a routing system. Analyze the following message.\n"
+            "CONTEXT: Use the provided chat history to resolve fragments like 'Yes', 'Add it', or '3'.\n"
             "If the message is conversational, greeting, or chatting, output exactly: CHIT_CHAT\n"
             "If the message is asking for a grocery list, output exactly: READ_LIST\n"
             "If the message is wanting to order delivery, output exactly: CHECKOUT\n"
             "Otherwise, output exactly: EXTRACT\n\n"
-            f"Message: '{message}'"
+            f"{history_context}\n"
+            f"Current Message: '{message}'"
         )
         
         try:
-            tier2_response = await llm_raw.ainvoke(tier2_prompt)
+            # MODULE 2: Timeout Prevention (5s)
+            tier2_response = await asyncio.wait_for(llm_raw.ainvoke(tier2_prompt), timeout=5.0)
             route_str = tier2_response.content.strip().upper()
             print(f"[TRACE] Tier 2 LLM Router evaluated as: {route_str} [TRACE]")
             
             if route_str == "CHIT_CHAT":
                 from schemas.intent_schemas import IntentType
-                return HouseholdIntentPayload(intent=IntentType.CHIT_CHAT, summary=message)
+                # In chat mode, use structured LLM to generate the final warm response with history context
+                chat_res = await asyncio.wait_for(structured_llm.ainvoke(f"{dynamic_prompt}\nUser: {message}"), timeout=5.0)
+                return chat_res
             elif route_str == "READ_LIST":
                 from schemas.intent_schemas import IntentType
                 return HouseholdIntentPayload(intent=IntentType.READ_LIST, summary=message)
             elif route_str == "CHECKOUT":
                 from schemas.intent_schemas import IntentType
                 return HouseholdIntentPayload(intent=IntentType.CHECKOUT_SIXTY60, summary=message)
+        except asyncio.TimeoutError:
+            logger.warning("Tier 2 Router timed out (5s). Falling back through pipeline.")
         except Exception as e:
             logger.warning(f"Tier 2 String router failed, proceeding to extraction pipeline: {e}")
-            pass
             
         # 3. Complex Intent Pipeline (Needs LangGraph Tools)
         print(f"[TRACE] Intent requires tools. Invoking LangGraph agent... [TRACE]")
-        agent_graph = create_household_agent(user_name, user_role)
+        agent_graph = create_household_agent(user_name, user_role, chat_history)
         inputs = {"messages": [{"role": "user", "content": message}]}
-        agent_response = await agent_graph.ainvoke(inputs)
+        
+        # MODULE 2: Timeout Prevention (5s)
+        agent_response = await asyncio.wait_for(agent_graph.ainvoke(inputs), timeout=5.0)
         
         # Extract the final AI message content holding tool context
         tool_gathered_context = agent_response["messages"][-1].content
         
         print(f"[TRACE] Invoking structured LLM for final tool-augmented extraction... [TRACE]")
         final_prompt = f"{dynamic_prompt}\n\nOriginal user message: '{message}'\nContext gathered by tools: '{tool_gathered_context}'\nExtract the requested struct."
-        result = await structured_llm.ainvoke(final_prompt)
+        
+        # MODULE 2: Timeout Prevention (5s)
+        result = await asyncio.wait_for(structured_llm.ainvoke(final_prompt), timeout=5.0)
         print(f"[TRACE] Structured LLM extracted result! [TRACE]")
         
         if isinstance(result, HouseholdIntentPayload):
@@ -164,9 +192,10 @@ async def process_user_intent(message: str, user_name: str = "Unknown", user_rol
             logger.error("Failed to parse LLM output into HouseholdIntentPayload.")
             return None
             
+    except asyncio.TimeoutError:
+        logger.error("Intent Engine timed out (5s). Returning None for fallback.")
+        return None
     except Exception as e:
         logger.error(f"Error in Intent Engine: {e}")
         print(f"\n[TRACE FATAL ERROR] Exception in process_user_intent: {e} [TRACE FATAL ERROR]\n")
-        import traceback
-        traceback.print_exc()
         return None
