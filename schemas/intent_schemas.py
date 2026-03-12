@@ -10,6 +10,7 @@ class IntentType(str, Enum):
     CHECKOUT_SIXTY60 = "checkout_sixty60"
     RECOMMEND_RECIPES = "recommend_recipes"
     SETTINGS = "settings"
+    CHIT_CHAT = "chit_chat"
 
 class GroceryItem(BaseModel):
     """Represents a single grocery item to be added to the database."""

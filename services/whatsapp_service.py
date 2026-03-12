@@ -261,6 +261,10 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
     intent = intent_payload.intent
     logger.info(f"Routing intent '{intent.value}' for {phone_number} (User: {user.name}, Role: {user.role.value})")
 
+    if intent == IntentType.CHIT_CHAT:
+        await send_whatsapp_message(phone_number, intent_payload.summary)
+        return
+        
     if intent == IntentType.ADD_ITEMS:
         # Extract items from all fields in the payload
         extracted_items = []
