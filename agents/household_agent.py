@@ -112,19 +112,39 @@ async def process_user_intent(message: str, user_name: str = "Unknown", user_rol
         if user_role.lower() == "requester":
             dynamic_prompt += "\nThis user is a Requester and CANNOT authorize checkouts. If they try to checkout, DO NOT classify as checkout_sixty60."
 
-        structured_llm = ChatOpenAI(model="gpt-4o", temperature=0.0).with_structured_output(HouseholdIntentPayload)
+        llm_raw = ChatOpenAI(model="gpt-4o", temperature=0.0)
+        structured_llm = llm_raw.with_structured_output(HouseholdIntentPayload)
         
-        # 1. Single-Pass Fast Router
-        print(f"[TRACE] Invoking structured LLM for Single-Pass Routing... [TRACE]")
-        fast_prompt = f"{dynamic_prompt}\n\nOriginal user message: '{message}'\nExtract the requested struct."
-        fast_result = await structured_llm.ainvoke(fast_prompt)
+        # --- Tier 2: Bulletproof LLM Fallback Router ---
+        print(f"[TRACE] Invoking Tier 2 String-Only LLM Router... [TRACE]")
+        tier2_prompt = (
+            "You are a routing system. Analyze the following message.\n"
+            "If the message is conversational, greeting, or chatting, output exactly: CHIT_CHAT\n"
+            "If the message is asking for a grocery list, output exactly: READ_LIST\n"
+            "If the message is wanting to order delivery, output exactly: CHECKOUT\n"
+            "Otherwise, output exactly: EXTRACT\n\n"
+            f"Message: '{message}'"
+        )
         
-        # If the intent doesn't require tools, return immediately to eliminate latency!
-        if fast_result.intent in [IntentType.CHIT_CHAT, IntentType.READ_LIST, IntentType.CHECKOUT_SIXTY60, IntentType.SETTINGS]:
-            print(f"[TRACE] Fast single-pass completed for intent: {fast_result.intent} [TRACE]")
-            return fast_result
+        try:
+            tier2_response = await llm_raw.ainvoke(tier2_prompt)
+            route_str = tier2_response.content.strip().upper()
+            print(f"[TRACE] Tier 2 LLM Router evaluated as: {route_str} [TRACE]")
             
-        # 2. Complex Intent Pipeline (Needs LangGraph Tools)
+            if route_str == "CHIT_CHAT":
+                from schemas.intent_schemas import IntentType
+                return HouseholdIntentPayload(intent=IntentType.CHIT_CHAT, summary=message)
+            elif route_str == "READ_LIST":
+                from schemas.intent_schemas import IntentType
+                return HouseholdIntentPayload(intent=IntentType.READ_LIST, summary=message)
+            elif route_str == "CHECKOUT":
+                from schemas.intent_schemas import IntentType
+                return HouseholdIntentPayload(intent=IntentType.CHECKOUT_SIXTY60, summary=message)
+        except Exception as e:
+            logger.warning(f"Tier 2 String router failed, proceeding to extraction pipeline: {e}")
+            pass
+            
+        # 3. Complex Intent Pipeline (Needs LangGraph Tools)
         print(f"[TRACE] Intent requires tools. Invoking LangGraph agent... [TRACE]")
         agent_graph = create_household_agent(user_name, user_role)
         inputs = {"messages": [{"role": "user", "content": message}]}

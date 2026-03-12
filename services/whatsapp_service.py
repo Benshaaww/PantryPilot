@@ -85,6 +85,12 @@ _onboarding_state: dict[str, str] = {}
 # Maps phone_number -> List of dicts representing GroceryItems
 _staging_buffer: dict[str, list] = {}
 
+# Tracks consecutive fallback failures to prevent infinite loops
+_routing_failures: dict[str, int] = {}
+
+# Sliding window to hold the last 5 messages for general chat mode
+_chat_history: dict[str, list[dict]] = {}
+
 def _build_confirmation_message(summary: str, item_names: list[str]) -> str:
     """
     Builds a premium, conversational WhatsApp confirmation message.
@@ -216,7 +222,40 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
     logger.info(f"Routing intent '{intent.value}' for {phone_number} (User: {user.name}, Role: {user.role.value})")
 
     if intent == IntentType.CHIT_CHAT:
-        await send_whatsapp_message(phone_number, intent_payload.summary)
+        # General Chat Phase 4: Use standalone memory-backed ChatOpenAI
+        from langchain_openai import ChatOpenAI
+        
+        chat_llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+        history = _chat_history.get(phone_number, [])
+        
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        
+        messages = [
+            SystemMessage(content="You are PantryPilot. You are highly intelligent, conversational, and direct. You must NOT narrate your actions.")
+        ]
+        
+        # Load up to last 5 messages
+        for msg in history[-5:]:
+            if msg["role"] == "user":
+                messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                messages.append(AIMessage(content=msg["content"]))
+                
+        # Append the new message
+        messages.append(HumanMessage(content=intent_payload.summary))  # summary holds the user message here
+        
+        # Save to history
+        history.append({"role": "user", "content": intent_payload.summary})
+        
+        response = await chat_llm.ainvoke(messages)
+        final_text = response.content
+        
+        history.append({"role": "assistant", "content": final_text})
+        
+        # Keep only last 5 exchanges (10 messages total)
+        _chat_history[phone_number] = history[-10:]
+        
+        await send_whatsapp_message(phone_number, final_text)
         return
         
     if intent == IntentType.ADD_ITEMS:
@@ -240,20 +279,30 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
             )
             return
 
-        # Stage the items
-        _staging_buffer[phone_number] = extracted_items
-
-        # Build Staging UI
-        item_bullet_list = "\n".join([f"  {item['item_name']}" for item in extracted_items])
-        msg_text = (
-            f"📝 I've extracted these items:\n"
-            f"{item_bullet_list}\n\n"
-            f"Should I add these to your family pantry?\n\n"
-            f"1 - ✅ Confirm & Add\n"
-            f"2 - ✏️ Edit / Try Again"
-        )
+        # --- Smart Extraction & Async Priority ---
+        # 1. Send Success Message Immediately
+        saved_names = [item["item_name"] for item in extracted_items]
+        confirmation = _build_confirmation_message("Added items", saved_names)
+        await send_whatsapp_message(phone_number, confirmation)
         
-        await send_whatsapp_message(phone_number, msg_text)
+        # 2. Background DB writes
+        import asyncio
+        async def _bg_save():
+            requester_name = user.name if user else "System"
+            for item in extracted_items:
+                from schemas.intent_schemas import GroceryItem
+                item_obj = GroceryItem(
+                    item_name=item["item_name"],
+                    quantity=item.get("quantity", "1"),
+                    category=item.get("category", "Other"),
+                    urgency=item.get("urgency", "Normal")
+                )
+                await grocery_repo.add_or_update_item(
+                    item=item_obj,
+                    family_id=user.family_id,
+                    requested_by=requester_name
+                )
+        asyncio.create_task(_bg_save())
 
     elif intent == IntentType.READ_LIST:
         pending_items = await grocery_repo.get_pending_items(user.family_id)
@@ -541,9 +590,28 @@ async def process_text_message(phone_number: str, text: str):
     if not user:
         return # Handled by onboarding flow
         
+    # --- Tier 1: Regex Pre-Flight (Bulletproof Router) ---
+    text_lower = text.strip().lower()
+    
+    # Check Conversational Words
+    chat_words = ["chat", "talk", "hello", "hi", "hey"]
+    if any(word in text_lower for word in chat_words) and len(text_lower.split()) <= 5:
+        # Route directly to Chit-Chat bypass
+        intent_payload = HouseholdIntentPayload(intent=IntentType.CHIT_CHAT, summary=text)
+        await _route_intent(phone_number, intent_payload, user)
+        # Clear failure tracking
+        _routing_failures[phone_number] = 0
+        return
+        
+    # Check Extraction Words
+    extract_words = ["add", "need", "out of", "buy", "get", "cart", "list"]
+    if any(word in text_lower for word in extract_words):
+        # Allow default LLM fall-through for extraction, bypassing specific rigid blocks
+        pass
+        
     import asyncio
     # Create the task for Intent Engine
-    intent_task = asyncio.create_task(household_agent.process_user_intent(text))
+    intent_task = asyncio.create_task(household_agent.process_user_intent(text, user.name, user.role.value))
     
     # Wait for the task to finish or timeout after 4 seconds
     done, pending = await asyncio.wait([intent_task], timeout=4.0)
@@ -559,16 +627,39 @@ async def process_text_message(phone_number: str, text: str):
         intent_payload = intent_task.result()
     
     if intent_payload:
+        _routing_failures[phone_number] = 0 # reset failures on success
         logger.info(f"Agent classified intent: {intent_payload.intent.value} | {intent_payload.summary}")
         print(f"[TRACE] Agent returned intent: {intent_payload.intent.value} [TRACE]")
+        
+        if intent_payload.intent == IntentType.CHIT_CHAT:
+             # Override summary to be the raw text so memory router works
+             intent_payload.summary = text
+             
         await _route_intent(phone_number, intent_payload, user)
     else:
         logger.warning(f"Agent failed to parse intent for message: {text}")
         print(f"[TRACE] Agent failed to parse intent, returned None! [TRACE]")
-        await send_whatsapp_message(
-            phone_number,
-            "I'm a bit lost—are we adding items to your list, or just chatting?"
-        )
+        
+        # --- Kill the Infinite Loop ---
+        failures = _routing_failures.get(phone_number, 0) + 1
+        _routing_failures[phone_number] = failures
+        
+        if failures >= 2:
+            print(f"[TRACE] Failures hit {failures}! Forcing State Reset to General Chat. [TRACE]")
+            # 2 Strikes! Reset states and force chat
+            _routing_failures[phone_number] = 0
+            if phone_number in _onboarding_state:
+                del _onboarding_state[phone_number]
+            if phone_number in _staging_buffer:
+                del _staging_buffer[phone_number]
+                
+            intent_payload = HouseholdIntentPayload(intent=IntentType.CHIT_CHAT, summary=text)
+            await _route_intent(phone_number, intent_payload, user)
+        else:
+            await send_whatsapp_message(
+                phone_number,
+                "I'm a bit lost—are we adding items to your list, or just chatting?"
+            )
 
 async def _download_media_from_meta(media_id: str) -> bytes:
     """
