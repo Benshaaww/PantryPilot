@@ -16,33 +16,29 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Household OS",
-    description="WhatsApp-based family management SaaS",
-    version="1.0.0"
-)
-
-# Include routers
-app.include_router(webhook_router, tags=["Webhook"])
-app.include_router(admin_router, prefix="/api", tags=["Admin Command"])
+from contextlib import asynccontextmanager
 
 scheduler = AsyncIOScheduler()
 
-@app.on_event("startup")
-async def startup_event():
-    """Starts background services when the application boots up."""
+# Define lifespan manager for background services
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Starts and cleans up background services."""
     logger.info("Starting up Household OS services...")
-    
     # Production mode: run daily at 4:00 PM
     scheduler.add_job(generate_daily_summary, 'cron', hour=16, minute=0)
     scheduler.start()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleans up background services when the application shuts down."""
+    yield
     logger.info("Shutting down Household OS services...")
     scheduler.shutdown()
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(
+    title="Household OS",
+    description="WhatsApp-based family management SaaS",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 @app.get("/")
 async def root():

@@ -7,9 +7,11 @@ import base64
 from openai import AsyncOpenAI
 from agents import household_agent
 from db import grocery_repo, user_repo
-from schemas.intent_schemas import HouseholdIntentPayload, IntentType
+from schemas.intent_schemas import HouseholdIntentPayload, IntentType, GroceryItem
 from schemas.user_schemas import User, UserRole
 from services import ecommerce_service
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,9 @@ async def send_interactive_menu(to_number: str, text: str, buttons: list[dict]):
         
         return await send_whatsapp_message(to_number, fallback_text)
 
+# Alias for backward compatibility or different naming conventions used in the agent
+send_interactive_buttons = send_interactive_menu
+
 async def _send_standard_menu(phone_number: str):
     """
     MODULE 3: Core Menu Implementation
@@ -212,7 +217,7 @@ def _build_confirmation_message(summary: str, item_names: list[str]) -> str:
 
     return f"{opener}\n\n{items_bullet}\n\n{cta}"
 
-async def route_payload_to_db(payload: HouseholdIntentPayload, requester_name: str = "System") -> list[str]:
+async def route_payload_to_db(payload: HouseholdIntentPayload, family_id: str, requester_name: str = "System") -> list[str]:
     """
     Takes the structured intent payload from the LangChain agent 
     and iterates through all extracted items, sending them to the 
@@ -223,22 +228,22 @@ async def route_payload_to_db(payload: HouseholdIntentPayload, requester_name: s
     
     # 1. Standard Groceries
     if payload.standard_groceries:
-        for item in payload.standard_groceries:
-            await grocery_repo.add_or_update_item(item, requested_by=requester_name)
-            saved_items.append(item.item_name)
-            
+            for item in payload.standard_groceries:
+                await grocery_repo.add_or_update_item(item, family_id=family_id, requested_by=requester_name)
+                saved_items.append(item.item_name)
+                
     # 2. Recipes
     if payload.recipe_extractions:
         for recipe in payload.recipe_extractions:
             for item in recipe.ingredients:
-                await grocery_repo.add_or_update_item(item, requested_by=requester_name)
+                await grocery_repo.add_or_update_item(item, family_id=family_id, requested_by=requester_name)
                 saved_items.append(item.item_name)
                 
     # 3. Calendar Predictions
     if payload.calendar_predictions:
         for event in payload.calendar_predictions:
             for item in event.predicted_items:
-                await grocery_repo.add_or_update_item(item, requested_by=requester_name)
+                await grocery_repo.add_or_update_item(item, family_id=family_id, requested_by=requester_name)
                 saved_items.append(item.item_name)
                 
     logger.info(f"Successfully routed {len(saved_items)} items to the database.")
@@ -315,12 +320,8 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
 
     if intent == IntentType.CHIT_CHAT:
         # General Chat Phase 4: Use standalone memory-backed ChatOpenAI
-        from langchain_openai import ChatOpenAI
-        
         chat_llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
         history = _chat_history.get(phone_number, [])
-        
-        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
         
         messages = [
             SystemMessage(content="You are PantryPilot. You are highly intelligent, conversational, and direct. You must NOT narrate your actions.")
@@ -354,15 +355,15 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
         # Extract items from all fields in the payload
         extracted_items = []
         if intent_payload.standard_groceries:
-            extracted_items.extend([i.dict() for i in intent_payload.standard_groceries])
+            extracted_items.extend([i.model_dump() for i in intent_payload.standard_groceries])
             
         if intent_payload.recipe_extractions:
             for recipe in intent_payload.recipe_extractions:
-                extracted_items.extend([i.dict() for i in recipe.ingredients])
+                extracted_items.extend([i.model_dump() for i in recipe.ingredients])
                 
         if intent_payload.calendar_predictions:
             for event in intent_payload.calendar_predictions:
-                extracted_items.extend([i.dict() for i in event.predicted_items])
+                extracted_items.extend([i.model_dump() for i in event.predicted_items])
 
         if not extracted_items:
             await send_whatsapp_message(
@@ -374,7 +375,6 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
         # --- Smart Extraction & Async Priority (Awaited for Consistency) ---
         requester_name = user.name if user else "System"
         for item in extracted_items:
-            from schemas.intent_schemas import GroceryItem
             item_obj = GroceryItem(
                 item_name=item["item_name"],
                 quantity=item.get("quantity", "1"),
@@ -545,7 +545,6 @@ async def process_interactive_message(phone_number: str, payload_id: str):
             # --- Async Priority (Snappy/Consistent Protocol) ---
             # DB writes first (Awaited) to prevent race conditions
             for item in items_to_save:
-                from schemas.intent_schemas import GroceryItem
                 item_obj = GroceryItem(
                     item_name=item["item_name"],
                     quantity=item.get("quantity", "1"),

@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 class UserRole(str, Enum):
@@ -13,4 +13,4 @@ class User(BaseModel):
     family_id: Optional[str] = None
     reminder_day: Optional[str] = None
     notification_enabled: bool = False
-    chat_history: list[dict] = []
+    chat_history: list[dict] = Field(default_factory=list)

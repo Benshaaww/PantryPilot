@@ -3,7 +3,7 @@ import json
 import time
 
 # Target local webhook URL
-WEBHOOK_URL = "http://127.0.0.1:8000/api/webhook"
+WEBHOOK_URL = "http://127.0.0.1:8000/webhook"
 
 def build_text_payload(message_body: str, sender_phone: str = "1234567890") -> dict:
     """Constructs a Meta incoming webhook payload for a text message."""

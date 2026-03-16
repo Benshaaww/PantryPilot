@@ -13,7 +13,7 @@ class AdminCommandPayload(BaseModel):
     command: str
 
 @router.post("/admin/command")
-async def handle_admin_command(payload: AdminCommandPayload, background_tasks: BackgroundTasks):
+async def handle_admin_command(payload: AdminCommandPayload, background_tasks: BackgroundTasks, family_id: str = "DEFAULT"):
     """
     Webhook endpoint to receive admin commands. 
     If 'Approve All' is received, fetch pending items, update DB status, and trigger Playwright.
@@ -21,11 +21,11 @@ async def handle_admin_command(payload: AdminCommandPayload, background_tasks: B
     command = payload.command.strip().lower()
     
     if command == "approve all":
-        logger.info("Received 'Approve All' command from Admin.")
+        logger.info(f"Received 'Approve All' command from Admin for family {family_id}.")
         
         try:
             # 1. Fetch pending items
-            pending_items = await get_pending_items()
+            pending_items = await get_pending_items(family_id)
             
             if not pending_items:
                 return {"status": "success", "message": "No pending items to approve."}

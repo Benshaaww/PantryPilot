@@ -3,17 +3,14 @@ import sys
 import os
 from typing import Optional
 from pydantic import BaseModel, Field
-from langchain_core.messages import SystemMessage
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-# Allow direct execution of this file (e.g. via VS Code "Run" button) by adding the project root to sys.path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from langchain_core.messages import SystemMessage
+from langchain_core.tools import tool
+import asyncio
 # Import the strict schemas and integration services
-from schemas.intent_schemas import HouseholdIntentPayload
+from schemas.intent_schemas import HouseholdIntentPayload, IntentType
 from services import calendar_service, recipe_scraper
 
 logger = logging.getLogger(__name__)
@@ -122,7 +119,7 @@ async def process_user_intent(message: str, user_name: str = "Unknown", user_rol
     """The main entrypoint for the Intent Engine using async invocation."""
     logger.info(f"Processing user intent for message: {message} (User: {user_name}, Role: {user_role})")
     print(f"\n[TRACE] household_agent.process_user_intent starting for: '{message}' [TRACE]")
-    import asyncio
+    print(f"\n[TRACE] household_agent.process_user_intent starting for: '{message}' [TRACE]")
     
     try:
         # MODULE 1: Build combined context
@@ -158,15 +155,12 @@ async def process_user_intent(message: str, user_name: str = "Unknown", user_rol
             print(f"[TRACE] Tier 2 LLM Router evaluated as: {route_str} [TRACE]")
             
             if route_str == "CHIT_CHAT":
-                from schemas.intent_schemas import IntentType
                 # In chat mode, use structured LLM to generate the final warm response with history context
                 chat_res = await asyncio.wait_for(structured_llm.ainvoke(f"{dynamic_prompt}\nUser: {message}"), timeout=5.0)
                 return chat_res
             elif route_str == "READ_LIST":
-                from schemas.intent_schemas import IntentType
                 return HouseholdIntentPayload(intent=IntentType.READ_LIST, summary=message)
             elif route_str == "CHECKOUT":
-                from schemas.intent_schemas import IntentType
                 return HouseholdIntentPayload(intent=IntentType.CHECKOUT_SIXTY60, summary=message)
         except asyncio.TimeoutError:
             logger.warning("Tier 2 Router timed out (5s). Falling back through pipeline.")
