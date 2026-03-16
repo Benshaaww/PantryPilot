@@ -1,5 +1,6 @@
 import os
 import tempfile
+from typing import Optional, Union, List
 import httpx
 import logging
 import base64
@@ -370,30 +371,26 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
             )
             return
 
-        # --- Smart Extraction & Async Priority ---
-        # 1. Send Success Message Immediately
+        # --- Smart Extraction & Async Priority (Awaited for Consistency) ---
+        requester_name = user.name if user else "System"
+        for item in extracted_items:
+            from schemas.intent_schemas import GroceryItem
+            item_obj = GroceryItem(
+                item_name=item["item_name"],
+                quantity=item.get("quantity", "1"),
+                category=item.get("category", "Other"),
+                urgency=item.get("urgency", "Normal")
+            )
+            await grocery_repo.add_or_update_item(
+                item=item_obj,
+                family_id=user.family_id,
+                requested_by=requester_name
+            )
+        
+        # 3. Send success message AFTER DB is confirmed
         saved_names = [item["item_name"] for item in extracted_items]
         confirmation = _build_confirmation_message("Added items", saved_names)
         await send_whatsapp_message(phone_number, confirmation)
-        
-        # 2. Background DB writes
-        import asyncio
-        async def _bg_save():
-            requester_name = user.name if user else "System"
-            for item in extracted_items:
-                from schemas.intent_schemas import GroceryItem
-                item_obj = GroceryItem(
-                    item_name=item["item_name"],
-                    quantity=item.get("quantity", "1"),
-                    category=item.get("category", "Other"),
-                    urgency=item.get("urgency", "Normal")
-                )
-                await grocery_repo.add_or_update_item(
-                    item=item_obj,
-                    family_id=user.family_id,
-                    requested_by=requester_name
-                )
-        asyncio.create_task(_bg_save())
 
     elif intent == IntentType.READ_LIST:
         pending_items = await grocery_repo.get_pending_items(user.family_id)
@@ -440,7 +437,7 @@ async def _route_intent(phone_number: str, intent_payload: HouseholdIntentPayloa
         await send_whatsapp_message(phone_number, f"⚙️ {intent_payload.summary}")
 
 
-async def check_user_or_onboard(phone_number: str, text: str = "") -> User | None:
+async def check_user_or_onboard(phone_number: str, text: str = "") -> Optional[User]:
     """
     Checks if a user is registered. Handles the onboarding flow if not.
     """
@@ -545,32 +542,28 @@ async def process_interactive_message(phone_number: str, payload_id: str):
             user = await user_repo.get_user(phone_number)
             requester_name = user.name if user else "System"
             
-            # --- Async Priority (Snappy Protocol) ---
-            # Send confirmation FIRST, then do DB writes in the background.
+            # --- Async Priority (Snappy/Consistent Protocol) ---
+            # DB writes first (Awaited) to prevent race conditions
+            for item in items_to_save:
+                from schemas.intent_schemas import GroceryItem
+                item_obj = GroceryItem(
+                    item_name=item["item_name"],
+                    quantity=item.get("quantity", "1"),
+                    category=item.get("category", "Other"),
+                    urgency=item.get("urgency", "Normal")
+                )
+                await grocery_repo.add_or_update_item(
+                    item=item_obj,
+                    family_id=user.family_id,
+                    requested_by=requester_name
+                )
+
+            # Send confirmation AFTER DB update
             saved_names = [item["item_name"] for item in items_to_save]
             confirmation = _build_confirmation_message("Staged items committed", saved_names)
             await send_whatsapp_message(phone_number, confirmation)
             
             del _staging_buffer[phone_number]
-            
-            # Background DB writes
-            import asyncio
-            async def _bg_save():
-                for item in items_to_save:
-                    from schemas.intent_schemas import GroceryItem
-                    item_obj = GroceryItem(
-                        item_name=item["item_name"],
-                        quantity=item.get("quantity", "1"),
-                        category=item.get("category", "Other"),
-                        urgency=item.get("urgency", "Normal")
-                    )
-                    await grocery_repo.add_or_update_item(
-                        item=item_obj,
-                        family_id=user.family_id,
-                        requested_by=requester_name
-                    )
-            
-            asyncio.create_task(_bg_save())
             
         else:
             await send_whatsapp_message(phone_number, "⚠️ I couldn't find any pending items to confirm. Try sending them again!")

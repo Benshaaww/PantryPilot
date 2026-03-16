@@ -4,8 +4,35 @@ from fastapi import APIRouter, Request, HTTPException, Query, Response, Backgrou
 from schemas.whatsapp import WhatsAppWebhookPayload
 from services import whatsapp_service
 
+import time
+from collections import deque
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# --- MODULE: PRODUCTION-GRADE DEDUPLICATION ---
+# Store the last 500 message IDs with their timestamps to prevent replay/retry loops.
+PROCESSED_WAMIDS = {}
+WAMID_EXPIRY_SECONDS = 60
+WAMID_CLEANUP_THRESHOLD = 500
+
+def is_duplicate(wamid: str) -> bool:
+    """Checks if a wamid has been processed in the last 60 seconds."""
+    now = time.time()
+    
+    # Prune old entries if the cache gets too large
+    if len(PROCESSED_WAMIDS) > WAMID_CLEANUP_THRESHOLD:
+        expired = [wid for wid, ts in PROCESSED_WAMIDS.items() if now - ts > WAMID_EXPIRY_SECONDS]
+        for wid in expired:
+            del PROCESSED_WAMIDS[wid]
+
+    if wamid in PROCESSED_WAMIDS:
+        if now - PROCESSED_WAMIDS[wamid] < WAMID_EXPIRY_SECONDS:
+            return True
+    
+    PROCESSED_WAMIDS[wamid] = now
+    return False
+
 
 @router.get("/webhook")
 async def verify_webhook(
@@ -75,6 +102,20 @@ async def handle_webhook(payload: WhatsAppWebhookPayload, background_tasks: Back
     """
     Handle incoming WhatsApp Webhook events.
     Immediately returns 200 OK and dispatches payload processing to a background task.
+    Includes production-grade deduplication for Meta retries.
     """
+    # 1. Quick Extraction of WAMIDs for Deduplication
+    try:
+        for entry in payload.entry:
+            for change in entry.changes:
+                if change.value.messages:
+                    for message in change.value.messages:
+                        if is_duplicate(message.id):
+                            logger.info(f"Duplicate message detected (wamid: {message.id}). Discarding.")
+                            return {"status": "success", "detail": "duplicate"}
+    except Exception as e:
+        logger.error(f"Error during quick deduplication check: {e}")
+
+    # 2. Dispatch to Background Task (Async/Snappy response)
     background_tasks.add_task(process_webhook_payload, payload)
     return {"status": "success"}

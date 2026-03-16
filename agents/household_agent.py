@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_agent
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # Allow direct execution of this file (e.g. via VS Code "Run" button) by adding the project root to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -106,12 +107,16 @@ def create_household_agent(user_name: str, user_role: str, chat_history: list[di
     if user_role.lower() == "requester":
         dynamic_prompt += "\nThis user is a Requester and CANNOT authorize checkouts. If they try to checkout, DO NOT classify as checkout_sixty60 (fallback to chat or a polite decline, or let the router catch it)."
         
-    agent_graph = create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=dynamic_prompt
-    )
-    return agent_graph
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", dynamic_prompt),
+        MessagesPlaceholder(variable_name="messages"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+
+    agent = create_tool_calling_agent(llm, tools, prompt)
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False)
+    
+    return agent_executor
 
 async def process_user_intent(message: str, user_name: str = "Unknown", user_role: str = "requester", chat_history: list[dict] = []) -> Optional[HouseholdIntentPayload]:
     """The main entrypoint for the Intent Engine using async invocation."""

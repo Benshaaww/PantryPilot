@@ -1,6 +1,7 @@
 import logging
 import random
 import string
+from typing import Optional, Union, List
 from db.mongo_client import get_database
 from schemas.user_schemas import User, UserRole
 
@@ -8,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "users"
 
-async def get_user(phone_number: str) -> User | None:
+async def get_user(phone_number: str) -> Optional[User]:
     """Fetches a user by their phone number."""
     try:
         db = await get_database()
@@ -30,7 +31,7 @@ async def get_user(phone_number: str) -> User | None:
         logger.error(f"Error fetching user {phone_number}: {e}")
         return None
 
-async def register_user(phone_number: str, name: str, role: UserRole, family_id: str | None = None) -> User | None:
+async def register_user(phone_number: str, name: str, role: UserRole, family_id: Optional[str] = None) -> Optional[User]:
     """Registers a new user in the database. Generates a family_id if none is provided."""
     try:
         db = await get_database()
