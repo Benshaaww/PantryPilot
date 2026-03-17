@@ -1,32 +1,22 @@
-FROM python:3.11-slim
+# Use a modern, stable Python base image (Bookworm = Debian 12)
+FROM python:3.9-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies if needed (e.g., for playwright)
-RUN apt-get update && apt-get install -y \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    librandr2 \
-    libgbm1 \
-    libasound2 \
-    libpango-1.0-0 \
-    libpangocairo-1.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
+# Upgrade pip and install requirements
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright browser and let IT handle the messy Linux dependencies safely
+RUN playwright install chromium
+RUN playwright install-deps
+
+# Copy your actual project code into the container
 COPY . .
 
+# Expose the port Render uses
 EXPOSE 8000
 
+# Start the engine
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
