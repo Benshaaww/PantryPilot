@@ -1,5 +1,5 @@
 # Use a modern, stable Python base image (Bookworm = Debian 12)
-FROM python:3.9-slim-bookworm
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
