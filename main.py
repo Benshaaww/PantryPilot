@@ -45,6 +45,10 @@ async def root():
     """Health check endpoint to verify server is running."""
     return {"status": "ok", "message": "Household OS is running"}
 
+# Register routers
+app.include_router(webhook_router)
+app.include_router(admin_router, prefix="/admin")
+
 if __name__ == "__main__":
     import uvicorn
     # Run the server locally using Uvicorn

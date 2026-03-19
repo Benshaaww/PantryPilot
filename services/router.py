@@ -45,6 +45,9 @@ async def process_inbound_message(message: Message):
     else:
         logger.info(f"Received unhandled message type: {msg_type}")
 
+from services.whatsapp_ui import WhatsAppUI
+from services.whatsapp_client import send_whatsapp_message as native_send_whatsapp_message
+
 async def route_interactive_message(phone_number: str, payload_id: str):
     """
     Deterministic routing for interactive messages (buttons and lists).
@@ -52,30 +55,64 @@ async def route_interactive_message(phone_number: str, payload_id: str):
     """
     logger.info(f"Routing interactive payload: '{payload_id}' for {phone_number}")
 
-    # The deterministic router overrides or intercepts specific payload IDs here.
     if payload_id == 'CMD_VIEW_PANTRY':
+        print(f"\n🟢 DETECTED BUTTON CLICK: {payload_id} from {phone_number}")
+        print("-> Routing to get_inventory()\n")
         await _dummy_get_inventory(phone_number)
     elif payload_id == 'CMD_ADD_ITEM':
+        print(f"\n🟢 DETECTED BUTTON CLICK: {payload_id} from {phone_number}")
+        print("-> Routing to add_item()\n")
         await _dummy_add_item(phone_number)
+    elif payload_id == 'CMD_MAIN_MENU':
+        print(f"\n🟢 DETECTED BUTTON CLICK: {payload_id} from {phone_number}")
+        print("-> Routing back to main menu()\n")
+        await route_text_message(phone_number, "Main Menu Triggered")
     else:
         # Fallback to existing interactive logic for LangChain or standard menu intents if not statically overridden.
         await whatsapp_service.process_interactive_message(phone_number, payload_id)
 
 async def route_text_message(phone_number: str, text: str):
     """
-    Default routing for standard text messages.
+    Bypasses LangChain logic entirely for the core workflow natively returning the Main Menu via Meta Interactive Lists.
     """
-    logger.info(f"Routing text message from {phone_number} to LangChain engine")
-    # For standard text strings, default to LangChain agent (via standard process)
-    await whatsapp_service.process_text_message(phone_number, text)
+    logger.info(f"Intercepting text message from {phone_number}: Natively bouncing to Main Menu UI constraints")
+    
+    sections = [
+        {
+            "title": "Pantry Actions",
+            "rows": [
+                {"id": "CMD_VIEW_PANTRY", "title": "View Pantry", "description": "See your current grocery list"},
+                {"id": "CMD_ADD_ITEM", "title": "Add Item", "description": "Add new items to your pantry"},
+                {"id": "CMD_COOK_SOMETHING", "title": "Cook Something", "description": "Get recipe recommendations"}
+            ]
+        }
+    ]
+    
+    payload = WhatsAppUI.build_list_message(
+        to_number=phone_number,
+        text="👋 Welcome to PantryPilot v2.0! What would you like to do?",
+        menu_button_text="Main Menu",
+        sections=sections
+    )
+    
+    await native_send_whatsapp_message(payload)
 
 async def _dummy_get_inventory(phone_number: str):
-    """Dummy static function to simulate retrieving pantry inventory."""
+    """Retrieves pantry inventory natively sending Meta API Interactive Quick Reply buttons backwards."""
     logger.info(f"Executing deterministic intent CMD_VIEW_PANTRY for {phone_number}")
-    await whatsapp_service.send_whatsapp_message(
-        phone_number,
-        "Here is your pantry inventory: \n- 🍎 Apples\n- 🍞 Bread\n- 🥛 Milk (Dummy Data)"
+    
+    buttons = [
+        {"id": "CMD_MAIN_MENU", "title": "Main Menu"},
+        {"id": "CMD_ADD_ITEM", "title": "Add Item"}
+    ]
+    
+    payload = WhatsAppUI.build_button_message(
+        to_number=phone_number,
+        text="Your pantry has 3 items. (Database connection coming soon!)",
+        buttons=buttons
     )
+    
+    await native_send_whatsapp_message(payload)
 
 async def _dummy_add_item(phone_number: str):
     """Dummy static function to simulate starting the add item flow."""

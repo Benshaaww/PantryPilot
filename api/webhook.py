@@ -52,24 +52,31 @@ async def verify_webhook(
     raise HTTPException(status_code=403, detail="Verification failed")
 
 from services.router import process_inbound_message
+from schemas.whatsapp import Message
 
-async def process_webhook_payload(payload: WhatsAppWebhookPayload):
+async def process_webhook_payload(payload: dict):
     """
     Background task to process the webhook payload.
-    Layer 1 Gateway: Strips Meta wrappers and sends to Layer 2 Router.
+    Layer 1 Gateway: Strips Meta wrappers via dictionary traversal and sends to Layer 2 Router.
     """
     print("\n[ALARM] WEBHOOK ENDPOINT HIT! [ALARM]")
-    print(f"Raw Parsed Payload: {payload.model_dump()}\n")
+    print(f"Raw Parsed Payload: {payload}\n")
     phone_number = None
     try:
-        for entry in payload.entry:
-            for change in entry.changes:
-                value = change.value
-                if value.messages:
-                    for message in value.messages:
-                        phone_number = message.from_
-                        # Handoff cleanly extracted message payload to Layer 2 Router
-                        await process_inbound_message(message)
+        entries = payload.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                for msg_dict in messages:
+                    phone_number = msg_dict.get("from")
+                    # Strict validation ONLY on the core message object
+                    try:
+                        message_obj = Message(**msg_dict)
+                        await process_inbound_message(message_obj)
+                    except Exception as e:
+                        logger.error(f"Pydantic parsing failed for inner message: {e}")
     except Exception as e:
         logger.error(f"Error processing webhook payload: {e}", exc_info=True)
         if phone_number:
@@ -82,21 +89,31 @@ async def process_webhook_payload(payload: WhatsAppWebhookPayload):
                 logger.error(f"Failed to send fallback error message: {nested_e}")
 
 @router.post("/webhook")
-async def handle_webhook(payload: WhatsAppWebhookPayload, background_tasks: BackgroundTasks):
+async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Handle incoming WhatsApp Webhook events.
+    Accepts raw Request to bypass 422 Validation Errors on messy Meta outer wrappers.
     Immediately returns 200 OK and dispatches payload processing to a background task.
-    Includes production-grade deduplication for Meta retries.
     """
+    try:
+        payload = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse JSON from Meta webhook: {e}")
+        return {"status": "error", "message": "Invalid JSON"}
+
     # 1. Quick Extraction of WAMIDs for Deduplication
     try:
-        for entry in payload.entry:
-            for change in entry.changes:
-                if change.value.messages:
-                    for message in change.value.messages:
-                        if is_duplicate(message.id):
-                            logger.info(f"Duplicate message detected (wamid: {message.id}). Discarding.")
-                            return {"status": "success", "detail": "duplicate"}
+        entries = payload.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                for msg_dict in messages:
+                    msg_id = msg_dict.get("id")
+                    if msg_id and is_duplicate(msg_id):
+                        logger.info(f"Duplicate message detected (wamid: {msg_id}). Discarding.")
+                        return {"status": "success", "detail": "duplicate"}
     except Exception as e:
         logger.error(f"Error during quick deduplication check: {e}")
 
