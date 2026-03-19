@@ -23,17 +23,24 @@ class ButtonReply(BaseModel):
     id: str
     title: str
 
+class ListReply(BaseModel):
+    """Represents the payload of an interactive list selection."""
+    id: str
+    title: str
+    description: Optional[str] = None
+
 class InteractiveMessage(BaseModel):
     """Represents an interactive message payload."""
-    type: str  # e.g., 'button_reply'
+    type: str  # e.g., 'button_reply', 'list_reply'
     button_reply: Optional[ButtonReply] = None
+    list_reply: Optional[ListReply] = None
 
 class Message(BaseModel):
     """Represents a single WhatsApp message from a user."""
     from_: str = Field(alias="from", description="The sender's WhatsApp ID/phone number")
     id: str
     timestamp: str
-    type: str  # Enum could be used here: 'text', 'image', 'audio'
+    type: str  # Enum could be used here: 'text', 'image', 'audio', 'interactive'
     text: Optional[TextMessage] = None
     image: Optional[ImageMessage] = None
     audio: Optional[AudioMessage] = None

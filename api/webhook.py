@@ -51,12 +51,15 @@ async def verify_webhook(
     
     raise HTTPException(status_code=403, detail="Verification failed")
 
+from services.router import process_inbound_message
+
 async def process_webhook_payload(payload: WhatsAppWebhookPayload):
     """
     Background task to process the webhook payload.
+    Layer 1 Gateway: Strips Meta wrappers and sends to Layer 2 Router.
     """
     print("\n[ALARM] WEBHOOK ENDPOINT HIT! [ALARM]")
-    print(f"Raw Parsed Payload: {payload}\n")
+    print(f"Raw Parsed Payload: {payload.model_dump()}\n")
     phone_number = None
     try:
         for entry in payload.entry:
@@ -65,27 +68,8 @@ async def process_webhook_payload(payload: WhatsAppWebhookPayload):
                 if value.messages:
                     for message in value.messages:
                         phone_number = message.from_
-                        msg_type = message.type
-                        
-                        if msg_type == "text" and message.text:
-                            await whatsapp_service.process_text_message(
-                                phone_number=phone_number,
-                                text=message.text.body
-                            )
-                        elif msg_type in ["audio", "image", "sticker"]:
-                            # MODULE 4: Unsupported Media Bypass
-                            await whatsapp_service.send_whatsapp_message(
-                                phone_number,
-                                "I'm still learning to process media! For now, please type out your grocery requests."
-                            )
-                        elif msg_type == "interactive" and message.interactive:
-                            if message.interactive.type == "button_reply" and message.interactive.button_reply:
-                                await whatsapp_service.process_interactive_message(
-                                    phone_number=phone_number,
-                                    payload_id=message.interactive.button_reply.id
-                                )
-                        else:
-                            logger.info(f"Received unhandled message type: {msg_type}")
+                        # Handoff cleanly extracted message payload to Layer 2 Router
+                        await process_inbound_message(message)
     except Exception as e:
         logger.error(f"Error processing webhook payload: {e}", exc_info=True)
         if phone_number:
