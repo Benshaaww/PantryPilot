@@ -71,10 +71,32 @@ async def route_interactive_message(phone_number: str, payload_id: str):
         # Fallback to existing interactive logic for LangChain or standard menu intents if not statically overridden.
         await whatsapp_service.process_interactive_message(phone_number, payload_id)
 
+from services import state_manager
+from services import database
+
 async def route_text_message(phone_number: str, text: str):
     """
     Bypasses LangChain logic entirely for the core workflow natively returning the Main Menu via Meta Interactive Lists.
+    Now respects User State and acts identically to a Finite State Machine context block!
     """
+    # 1. Check Stateful Context Before Defaulting
+    current_state = state_manager.get_state(phone_number)
+    
+    if current_state == "AWAITING_ITEM_NAME":
+        logger.info(f"State matching AWAITING_ITEM_NAME for {phone_number}. Adding item: {text}")
+        database.add_item(phone_number, text)
+        state_manager.clear_state(phone_number)
+        
+        # We send a quiet Button payload acknowledging this success to keep them in flow
+        success_payload = WhatsAppUI.build_button_message(
+            to_number=phone_number,
+            text=f"✅ Added {text} to your pantry.",
+            buttons=[{"id": "CMD_MAIN_MENU", "title": "Main Menu"}]
+        )
+        await native_send_whatsapp_message(success_payload)
+        return
+
+    # Default fallback: Show main menu
     logger.info(f"Intercepting text message from {phone_number}: Natively bouncing to Main Menu UI constraints")
     
     sections = [
@@ -101,23 +123,38 @@ async def _dummy_get_inventory(phone_number: str):
     """Retrieves pantry inventory natively sending Meta API Interactive Quick Reply buttons backwards."""
     logger.info(f"Executing deterministic intent CMD_VIEW_PANTRY for {phone_number}")
     
+    items = database.get_inventory(phone_number)
+    
     buttons = [
         {"id": "CMD_MAIN_MENU", "title": "Main Menu"},
         {"id": "CMD_ADD_ITEM", "title": "Add Item"}
     ]
     
+    if not items:
+        text_body = "Your pantry is currently empty! 🛒"
+    else:
+        formatted_list = "\n".join([f"- {item}" for item in items])
+        text_body = f"Here is your current inventory:\n\n{formatted_list}"
+    
     payload = WhatsAppUI.build_button_message(
         to_number=phone_number,
-        text="Your pantry has 3 items. (Database connection coming soon!)",
+        text=text_body,
         buttons=buttons
     )
     
     await native_send_whatsapp_message(payload)
 
 async def _dummy_add_item(phone_number: str):
-    """Dummy static function to simulate starting the add item flow."""
+    """Simulates starting the add item flow by opening up a Stateful wait cycle."""
     logger.info(f"Executing deterministic intent CMD_ADD_ITEM for {phone_number}")
-    await whatsapp_service.send_whatsapp_message(
-        phone_number,
-        "What item would you like to add? Please type its name. (Dummy Data)"
-    )
+    
+    # 1. Set User state so the next text caught handles it cleanly
+    state_manager.set_state(phone_number, "AWAITING_ITEM_NAME")
+    
+    # 2. Return Prompt via text
+    await native_send_whatsapp_message({
+        "messaging_product": "whatsapp",
+        "to": phone_number,
+        "type": "text",
+        "text": {"body": "What item would you like to add? Please type its name."}
+    })

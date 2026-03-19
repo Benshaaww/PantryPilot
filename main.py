@@ -17,6 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from contextlib import asynccontextmanager
+from services.database import init_db
 
 scheduler = AsyncIOScheduler()
 
@@ -25,6 +26,8 @@ scheduler = AsyncIOScheduler()
 async def lifespan(app: FastAPI):
     """Starts and cleans up background services."""
     logger.info("Starting up Household OS services...")
+    # Initialize high-performance SQLite Database
+    init_db()
     # Production mode: run daily at 4:00 PM
     scheduler.add_job(generate_daily_summary, 'cron', hour=16, minute=0)
     scheduler.start()
