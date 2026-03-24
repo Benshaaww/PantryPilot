@@ -118,19 +118,30 @@ async def route_text_message(phone_number: str, text: str) -> None:
         await _handle_join_command(phone_number, text_stripped)
         return
 
-    # 2. Stateful: waiting for item name
+    # 2. Stateful: waiting for item name — supports comma-separated batch input
     if state_manager.get_state(phone_number) == "AWAITING_ITEM_NAME":
         household_id = database.get_household_id(phone_number)
-        logger.info("AWAITING_ITEM_NAME for %s — adding '%s'", phone_number, text_stripped)
-        database.add_grocery_item(household_id, text_stripped)
+
+        # "Shatter": split on commas, title-case each token, drop blanks
+        items = [i.strip().title() for i in text_stripped.split(",") if i.strip()]
+        if not items:
+            await _send_text(phone_number, "I didn't catch that — please type at least one item name.")
+            return
+
+        logger.info("AWAITING_ITEM_NAME for %s — adding %d item(s): %s", phone_number, len(items), items)
+        for item in items:
+            database.add_grocery_item(household_id, item)
         state_manager.clear_state(phone_number)
+
+        # Bulleted confirmation with per-item emoji decoration
+        bullet_lines = "\n".join(f"  {decorate_item(i)}" for i in items)
         await _send(WhatsAppUI.build_button_message(
             to_number=phone_number,
-            text=f"✅ Added {decorate_item(text_stripped)} to your grocery list!",
+            text=f"✅ Added to your list:\n\n{bullet_lines}",
             buttons=[
-                {"id": "CMD_ADD_ITEM",      "title": "Add Another"},
-                {"id": "CMD_VIEW_GROCERY",  "title": "View List"},
-                {"id": "CMD_MAIN_MENU",     "title": "Main Menu"},
+                {"id": "CMD_ADD_ITEM",     "title": "Add More"},
+                {"id": "CMD_VIEW_GROCERY", "title": "View List"},
+                {"id": "CMD_MAIN_MENU",    "title": "Main Menu"},
             ],
         ))
         return
