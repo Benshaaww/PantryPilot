@@ -5,7 +5,7 @@ from typing import Awaitable, Callable
 
 from schemas.whatsapp import Message
 from services import state_manager, database
-from services.invite_manager import generate_invite, get_deep_link, redeem_invite
+from services.invite_manager import generate_invite, redeem_invite
 from services.ui_decorator import decorate_item
 from services.whatsapp_ui import WhatsAppUI
 from services.whatsapp_client import send_whatsapp_message as _send
@@ -376,22 +376,36 @@ async def _handle_clear_list(phone_number: str) -> None:
 
 async def _handle_invite_family(phone_number: str) -> None:
     """Generates a fresh invite code and deep link, then shares both."""
+    import os
     household_id = database.get_household_id(phone_number)
     hh_name = database.get_household_name(household_id)
-    code = generate_invite(household_id)
-    link = get_deep_link(code)
-    logger.info("CMD_INVITE_FAMILY for %s — code %s", phone_number, code)
+    invite_code = generate_invite(household_id)
+    logger.info("CMD_INVITE_FAMILY for %s — code %s", phone_number, invite_code)
+
+    bot_number = os.getenv("WHATSAPP_BOT_NUMBER", os.getenv("WHATSAPP_PHONE_NUMBER", ""))
+    clean_bot_number = bot_number.replace("+", "").replace(" ", "").strip()
+
+    if clean_bot_number:
+        invite_link = f"https://wa.me/{clean_bot_number}?text=JOIN%20{invite_code}"
+        text_body = (
+            f"👥 Invite someone to *{hh_name}*!\n\n"
+            f"Tap the link below to invite them to your household! 🏠\n"
+            f"{invite_link}\n"
+            f"(Tapping the link opens WhatsApp with the join message ready to send)\n\n"
+            f"Or they can type manually:  JOIN {invite_code}\n\n"
+            f"_(Expires in 24 hours)_"
+        )
+    else:
+        text_body = (
+            f"👥 Invite someone to *{hh_name}*!\n\n"
+            f"Tell them to text this code to me:\n"
+            f"JOIN {invite_code}\n\n"
+            f"_(Expires in 24 hours)_"
+        )
 
     await _send(WhatsAppUI.build_button_message(
         to_number=phone_number,
-        text=(
-            f"👥 Invite someone to *{hh_name}*!\n\n"
-            f"Tap the link below to invite them to your household! 🏠\n\n"
-            f"{link}\n\n"
-            f"_(Tapping the link opens WhatsApp with the join message ready to send)_\n\n"
-            f"Or they can type manually:  JOIN {code}\n\n"
-            f"_(Expires in 24 hours)_"
-        ),
+        text=text_body,
         buttons=[
             {"id": "CMD_INVITE_FAMILY", "title": "🔄 New Code"},
             {"id": "CMD_MAIN_MENU",     "title": "Main Menu"},
