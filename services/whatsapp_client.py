@@ -1,79 +1,91 @@
-import os
-import httpx
-import logging
 import base64
+import logging
+import os
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
+_GRAPH_API_VERSION = "v17.0"
+
+
+def _credentials() -> tuple[str, str]:
+    """
+    Returns (token, phone_id) from environment variables.
+    Supports both the v1 and v2 env-var naming conventions.
+    Raises RuntimeError if either value is missing.
+    """
+    token = os.getenv("WHATSAPP_ACCESS_TOKEN") or os.getenv("WHATSAPP_API_TOKEN")
+    phone_id = os.getenv("PHONE_NUMBER_ID") or os.getenv("WHATSAPP_PHONE_ID")
+    if not token or not phone_id:
+        raise RuntimeError(
+            "Missing WhatsApp credentials. Set WHATSAPP_ACCESS_TOKEN and PHONE_NUMBER_ID."
+        )
+    return token, phone_id
+
+
 async def send_whatsapp_message(payload: dict) -> bool:
     """
-    Sends the dynamically constructed strict JSON payload dictionary 
-    directly to Meta's WhatsApp Cloud API endpoints.
-    Gracefully catches and logs all exceptions.
+    POSTs a pre-built JSON payload to the Meta Graph API.
+    Returns True on success, False on any error.
     """
     try:
-        # Securely pull environment variables (support existing env mappings as fallback)
-        token = os.getenv("WHATSAPP_ACCESS_TOKEN", os.getenv("WHATSAPP_API_TOKEN"))
-        phone_id = os.getenv("PHONE_NUMBER_ID", os.getenv("WHATSAPP_PHONE_ID"))
-        
-        if not token or not phone_id:
-            logger.error("Missing WhatsApp API credentials. Please configure .env parameters.")
-            return False
-            
-        url = f"https://graph.facebook.com/v17.0/{phone_id}/messages"
+        token, phone_id = _credentials()
+        url = f"https://graph.facebook.com/{_GRAPH_API_VERSION}/{phone_id}/messages"
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=8.0)
-            
             if response.status_code != 200:
-                logger.error(f"WhatsApp API Responded {response.status_code}: {response.text}")
-                
+                logger.error("WhatsApp API %d: %s", response.status_code, response.text)
             response.raise_for_status()
-            logger.info("Successfully delivered webhook response payload to Meta API.")
-            return True
-            
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP exception during WhatsApp API transmission: {e}")
+        logger.info("Message delivered to Meta API.")
+        return True
+    except RuntimeError as exc:
+        logger.error("Credential error: %s", exc)
         return False
-    except Exception as e:
-        logger.error(f"Unexpected Python error in WhatsApp API transmission: {e}")
+    except httpx.HTTPError as exc:
+        logger.error("HTTP error sending WhatsApp message: %s", exc)
         return False
+    except Exception as exc:
+        logger.error("Unexpected error sending WhatsApp message: %s", exc)
+        return False
+
 
 async def download_media_base64(media_id: str) -> str:
     """
-    Downloads media from Meta's Graph API safely in two steps and returns a base64 string.
-    Returns an empty string if it fails to resolve securely.
+    Downloads a media file from Meta's Graph API and returns it as a
+    base64-encoded string.  Returns an empty string on any failure.
     """
-    token = os.getenv("WHATSAPP_ACCESS_TOKEN", os.getenv("WHATSAPP_API_TOKEN"))
-    if not token:
-        logger.error("Missing WhatsApp API credentials for media download.")
-        return ""
-        
     try:
-        headers = {"Authorization": f"Bearer {token}"}
+        token, _ = _credentials()
+    except RuntimeError as exc:
+        logger.error("Credential error for media download: %s", exc)
+        return ""
+
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
         async with httpx.AsyncClient() as client:
-            # Step 1: Get the Media URL reference
-            media_info_url = f"https://graph.facebook.com/v17.0/{media_id}"
-            info_response = await client.get(media_info_url, headers=headers, timeout=8.0)
-            info_response.raise_for_status()
-            
-            media_url = info_response.json().get("url")
+            # Step 1 — resolve media URL
+            info_resp = await client.get(
+                f"https://graph.facebook.com/{_GRAPH_API_VERSION}/{media_id}",
+                headers=headers,
+                timeout=8.0,
+            )
+            info_resp.raise_for_status()
+            media_url: str = info_resp.json().get("url", "")
             if not media_url:
-                logger.error(f"No media URL returned for media_id {media_id}.")
+                logger.error("No URL in media info response for %s.", media_id)
                 return ""
-                
-            # Step 2: Download the binary payload natively
-            download_response = await client.get(media_url, headers=headers, timeout=15.0)
-            download_response.raise_for_status()
-            
-            # Encode payload into structural Base64 array
-            encoded_bytes = base64.b64encode(download_response.content)
-            return encoded_bytes.decode('utf-8')
-            
-    except Exception as e:
-        logger.error(f"Failed to download/encode media {media_id}: {e}")
+
+            # Step 2 — download binary content
+            dl_resp = await client.get(media_url, headers=headers, timeout=15.0)
+            dl_resp.raise_for_status()
+
+        return base64.b64encode(dl_resp.content).decode("utf-8")
+
+    except Exception as exc:
+        logger.error("Failed to download media %s: %s", media_id, exc)
         return ""
