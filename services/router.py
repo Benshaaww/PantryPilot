@@ -5,7 +5,7 @@ from typing import Awaitable, Callable
 
 from schemas.whatsapp import Message
 from services import state_manager, database
-from services.invite_manager import generate_invite, redeem_invite
+from services.invite_manager import generate_invite, get_deep_link, redeem_invite
 from services.ui_decorator import decorate_item
 from services.whatsapp_ui import WhatsAppUI
 from services.whatsapp_client import send_whatsapp_message as _send
@@ -201,14 +201,25 @@ async def _handle_join_command(phone_number: str, text: str) -> None:
     success, household_id, hh_name = redeem_invite(phone_number, code)
 
     if success:
+        # Role is set to MEMBER by join_household() — verify and build sync preview
+        items = database.get_grocery_list(household_id)
+        if items:
+            preview_items = items[:5]
+            item_lines = "\n".join(f"  {decorate_item(i)}" for i in preview_items)
+            more_note = f"\n  _...and {len(items) - 5} more_" if len(items) > 5 else ""
+            sync_section = f"\n\n📋 *Current List ({len(items)} items):*\n{item_lines}{more_note}"
+        else:
+            sync_section = "\n\n📋 The list is empty — you're first! Start adding items."
+
         await _send(WhatsAppUI.build_button_message(
             to_number=phone_number,
             text=(
-                f"🏠 Welcome to *{hh_name}*!\n\n"
-                "You can now see and add to the shared grocery list."
+                f"✅ *Sync Successful!*\n\n"
+                f"Welcome to *{hh_name}*! You've been added as a Member."
+                f"{sync_section}"
             ),
             buttons=[
-                {"id": "CMD_VIEW_GROCERY", "title": "View List"},
+                {"id": "CMD_VIEW_GROCERY", "title": "📝 View Full List"},
                 {"id": "CMD_MAIN_MENU",    "title": "Main Menu"},
             ],
         ))
@@ -353,21 +364,22 @@ async def _handle_clear_list(phone_number: str) -> None:
 
 
 async def _handle_invite_family(phone_number: str) -> None:
-    """Generates a fresh invite code and shares it with the user."""
+    """Generates a fresh invite code and deep link, then shares both."""
     household_id = database.get_household_id(phone_number)
     hh_name = database.get_household_name(household_id)
     code = generate_invite(household_id)
+    link = get_deep_link(code)
     logger.info("CMD_INVITE_FAMILY for %s — code %s", phone_number, code)
 
     await _send(WhatsAppUI.build_button_message(
         to_number=phone_number,
         text=(
             f"👥 Invite someone to *{hh_name}*!\n\n"
-            f"Share this code:\n\n"
-            f"  *{code}*\n\n"
-            f"They just need to type:\n"
-            f"  JOIN {code}\n\n"
-            f"_(Code expires in 24 hours)_"
+            f"Tap the link below to invite them to your household! 🏠\n\n"
+            f"{link}\n\n"
+            f"_(Tapping the link opens WhatsApp with the join message ready to send)_\n\n"
+            f"Or they can type manually:  JOIN {code}\n\n"
+            f"_(Expires in 24 hours)_"
         ),
         buttons=[
             {"id": "CMD_INVITE_FAMILY", "title": "🔄 New Code"},
@@ -488,7 +500,7 @@ async def handle_image_action(phone_number: str, media_id: str) -> None:
     logger.info("IMAGE_UPLOAD for %s (media_id: %s)", phone_number, media_id)
     household_id = database.get_household_id(phone_number)
 
-    await _send_text(phone_number, "📸 Analyzing your image... give me a second!")
+    await _send_text(phone_number, "📸 Identifying your items... searching for labels... 🔎")
 
     base64_img = await download_media_base64(media_id)
     if not base64_img:

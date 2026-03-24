@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import string
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from services import database
 
@@ -40,6 +42,20 @@ def generate_invite(household_id: int) -> str:
     except Exception as exc:
         logger.error("Failed to generate invite for household %d: %s", household_id, exc)
         return code  # Still return the code; the DB write failing is non-fatal for the UX
+
+
+def get_deep_link(code: str) -> str:
+    """
+    Returns a WhatsApp deep link that pre-fills 'JOIN <code>' in the user's
+    message box when tapped.
+
+    Reads WHATSAPP_BOT_NUMBER from the environment (international format,
+    with or without leading +).  Falls back to plain text if not set.
+    """
+    bot_number = os.getenv("WHATSAPP_BOT_NUMBER", "").lstrip("+").strip()
+    if not bot_number:
+        return f"JOIN {code}"  # Plain-text fallback if env var missing
+    return f"https://wa.me/{bot_number}?text={quote(f'JOIN {code}')}"
 
 
 def redeem_invite(phone_number: str, code: str) -> tuple[bool, int, str]:
