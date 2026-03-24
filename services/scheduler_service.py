@@ -21,17 +21,17 @@ async def generate_daily_summary() -> str:
     try:
         with database._get_db() as conn:
             cursor = conn.execute(
-                "SELECT h.household_name, p.item_name "
-                "FROM pantry_items p "
-                "JOIN households h ON h.id = p.household_id "
-                "ORDER BY h.id, p.added_at"
+                "SELECT h.household_name, s.item_name "
+                "FROM shopping_list s "
+                "JOIN households h ON h.id = s.household_id "
+                "ORDER BY h.id, s.added_at"
             )
             rows = cursor.fetchall()
 
         if not rows:
-            report = "📦 Daily Pantry Report: All households are fully stocked."
+            report = "🛒 Daily Grocery Report: All lists are empty."
         else:
-            lines: list[str] = ["📦 Daily Pantry Report:"]
+            lines: list[str] = ["🛒 Daily Grocery Report:"]
             current_hh: str = ""
             for hh_name, item_name in rows:
                 if hh_name != current_hh:

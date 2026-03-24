@@ -18,8 +18,7 @@ DB_PATH = "pantry.db"
 def _get_db() -> Generator[sqlite3.Connection, None, None]:
     """
     Yields a fully configured SQLite connection.
-    Sets WAL journaling, NORMAL sync, and FK enforcement on every connection
-    so callers never have to remember pragma boilerplate.
+    Sets WAL journaling, NORMAL sync, and FK enforcement on every connection.
     Commits on clean exit; rolls back on exception.
     """
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
@@ -42,85 +41,99 @@ def _get_db() -> Generator[sqlite3.Connection, None, None]:
 
 def init_db() -> None:
     """
-    Initialises the SQLite schema with WAL journaling and FK constraints.
-    Handles automated schema migration from the single-user v1 model to
-    the multi-user household model.
+    Initialises the SQLite schema.
+    Handles all migrations:
+      - v1 → v2: phone-keyed pantry_items → household model
+      - v2 → v3: pantry_items → grocery (shopping_list), invite codes, buyer roles
     """
     try:
         with _get_db() as conn:
+
+            # --- Core tables ---
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS households (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     household_name TEXT NOT NULL
                 )
             ''')
+
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS user_households (
                     phone_number TEXT PRIMARY KEY,
                     household_id INTEGER NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'MEMBER',
                     FOREIGN KEY(household_id) REFERENCES households(id) ON DELETE CASCADE
                 )
             ''')
 
-            # Detect legacy single-user schema and migrate if needed
-            cursor = conn.execute("PRAGMA table_info(pantry_items)")
-            columns = [col[1] for col in cursor.fetchall()]
+            # Migration: add role column if it doesn't exist yet (v2 → v3)
+            cursor = conn.execute("PRAGMA table_info(user_households)")
+            uh_cols = [col[1] for col in cursor.fetchall()]
+            if "role" not in uh_cols:
+                conn.execute(
+                    "ALTER TABLE user_households ADD COLUMN role TEXT NOT NULL DEFAULT 'MEMBER'"
+                )
+                logger.info("Migrated user_households: added role column.")
 
-            if "phone_number" in columns:
-                logger.info("Legacy pantry_items schema detected — running v2 migration.")
-
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS pantry_items_v2 (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        household_id INTEGER NOT NULL,
-                        item_name TEXT,
-                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(household_id) REFERENCES households(id) ON DELETE CASCADE
-                    )
-                ''')
-
-                cursor = conn.execute("SELECT DISTINCT phone_number FROM pantry_items")
-                for (phone,) in cursor.fetchall():
-                    cursor2 = conn.execute(
-                        "INSERT INTO households (household_name) VALUES (?)", ("Private Pantry",)
-                    )
-                    new_hh_id = cursor2.lastrowid
-                    conn.execute(
-                        "INSERT OR IGNORE INTO user_households (phone_number, household_id) VALUES (?, ?)",
-                        (phone, new_hh_id),
-                    )
-                    conn.execute('''
-                        INSERT INTO pantry_items_v2 (household_id, item_name, added_at)
-                        SELECT ?, item_name, added_at FROM pantry_items WHERE phone_number = ?
-                    ''', (new_hh_id, phone))
-
-                conn.execute("DROP TABLE pantry_items")
-                conn.execute("ALTER TABLE pantry_items_v2 RENAME TO pantry_items")
-                logger.info("Migration to multi-user household schema complete.")
-            else:
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS pantry_items (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        household_id INTEGER NOT NULL,
-                        item_name TEXT,
-                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(household_id) REFERENCES households(id) ON DELETE CASCADE
-                    )
-                ''')
-
+            # --- Grocery list (primary data table) ---
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS shopping_list (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     household_id INTEGER NOT NULL,
-                    item_name TEXT,
+                    item_name TEXT NOT NULL,
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(household_id) REFERENCES households(id) ON DELETE CASCADE
                 )
             ''')
-
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_pantry_household ON pantry_items(household_id);"
+                "CREATE INDEX IF NOT EXISTS idx_grocery_household "
+                "ON shopping_list(household_id);"
             )
+
+            # --- Invitation codes ---
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS household_invites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    household_id INTEGER NOT NULL,
+                    invite_code TEXT NOT NULL UNIQUE,
+                    expires_at TEXT NOT NULL,
+                    FOREIGN KEY(household_id) REFERENCES households(id) ON DELETE CASCADE
+                )
+            ''')
+
+            # --- v1 legacy migration: phone_number-keyed pantry_items ---
+            cursor = conn.execute("PRAGMA table_info(pantry_items)")
+            pantry_cols = [col[1] for col in cursor.fetchall()]
+
+            if pantry_cols and "phone_number" in pantry_cols:
+                logger.info("v1 pantry_items detected — migrating to household grocery model.")
+                cursor = conn.execute("SELECT DISTINCT phone_number FROM pantry_items")
+                for (phone,) in cursor.fetchall():
+                    cur2 = conn.execute(
+                        "INSERT INTO households (household_name) VALUES (?)", ("My Groceries",)
+                    )
+                    new_hh_id = cur2.lastrowid
+                    conn.execute(
+                        "INSERT OR IGNORE INTO user_households (phone_number, household_id) "
+                        "VALUES (?, ?)", (phone, new_hh_id)
+                    )
+                    conn.execute('''
+                        INSERT INTO shopping_list (household_id, item_name, added_at)
+                        SELECT ?, item_name, added_at FROM pantry_items WHERE phone_number = ?
+                    ''', (new_hh_id, phone))
+                conn.execute("DROP TABLE pantry_items")
+                logger.info("v1 migration complete — pantry_items merged into grocery list.")
+
+            # --- v2 legacy migration: household_id-keyed pantry_items → shopping_list ---
+            elif pantry_cols and "household_id" in pantry_cols:
+                logger.info("v2 pantry_items detected — merging into grocery list.")
+                conn.execute('''
+                    INSERT OR IGNORE INTO shopping_list (household_id, item_name, added_at)
+                    SELECT household_id, item_name, added_at FROM pantry_items
+                ''')
+                conn.execute("DROP TABLE pantry_items")
+                logger.info("v2 migration complete — pantry_items merged into grocery list.")
+
             logger.info("Database initialised at %s", DB_PATH)
 
     except sqlite3.Error as exc:
@@ -128,10 +141,7 @@ def init_db() -> None:
 
 
 def health_check() -> bool:
-    """
-    Runs a trivial SELECT 1 to verify the database file is reachable
-    and the connection stack is healthy.  Called on server startup.
-    """
+    """Runs a SELECT 1 to verify the DB is reachable. Called on server startup."""
     try:
         with _get_db() as conn:
             conn.execute("SELECT 1")
@@ -149,8 +159,8 @@ def health_check() -> bool:
 def get_household_id(phone_number: str) -> int:
     """
     Returns the household_id for this phone number.
-    Auto-provisions a new 'Private Pantry' household for first-time users.
-    Returns -1 on database error.
+    Auto-provisions a 'My Groceries' household for first-time users.
+    Returns -1 on error.
     """
     try:
         with _get_db() as conn:
@@ -163,12 +173,12 @@ def get_household_id(phone_number: str) -> int:
                 return int(row[0])
 
             cursor = conn.execute(
-                "INSERT INTO households (household_name) VALUES (?)", ("Private Pantry",)
+                "INSERT INTO households (household_name) VALUES (?)", ("My Groceries",)
             )
             new_hh_id = cursor.lastrowid
             conn.execute(
-                "INSERT INTO user_households (phone_number, household_id) VALUES (?, ?)",
-                (phone_number, new_hh_id),
+                "INSERT INTO user_households (phone_number, household_id, role) VALUES (?, ?, ?)",
+                (phone_number, new_hh_id, "MEMBER"),
             )
             return int(new_hh_id)
     except sqlite3.Error as exc:
@@ -189,8 +199,51 @@ def get_household_name(household_id: int) -> str:
         return "Unknown"
 
 
+def get_household_members(household_id: int) -> list[str]:
+    """Returns all phone numbers belonging to a household."""
+    try:
+        with _get_db() as conn:
+            cursor = conn.execute(
+                "SELECT phone_number FROM user_households WHERE household_id = ?",
+                (household_id,),
+            )
+            return [row[0] for row in cursor.fetchall()]
+    except sqlite3.Error as exc:
+        logger.error("DB error fetching members for household %d: %s", household_id, exc)
+        return []
+
+
+def get_household_buyers(household_id: int) -> list[str]:
+    """Returns phone numbers of all members with the BUYER role."""
+    try:
+        with _get_db() as conn:
+            cursor = conn.execute(
+                "SELECT phone_number FROM user_households "
+                "WHERE household_id = ? AND role = 'BUYER'",
+                (household_id,),
+            )
+            return [row[0] for row in cursor.fetchall()]
+    except sqlite3.Error as exc:
+        logger.error("DB error fetching buyers for household %d: %s", household_id, exc)
+        return []
+
+
+def set_member_role(phone_number: str, role: str) -> bool:
+    """Sets the role ('MEMBER' or 'BUYER') for a given phone number."""
+    try:
+        with _get_db() as conn:
+            conn.execute(
+                "UPDATE user_households SET role = ? WHERE phone_number = ?",
+                (role, phone_number),
+            )
+        return True
+    except sqlite3.Error as exc:
+        logger.error("DB error setting role for %s: %s", phone_number, exc)
+        return False
+
+
 def join_household(phone_number: str, target_id: int) -> bool:
-    """Links a user to an existing household by ID.  Returns False if the ID does not exist."""
+    """Links a user to an existing household by ID. Returns False if not found."""
     try:
         with _get_db() as conn:
             cursor = conn.execute(
@@ -199,9 +252,11 @@ def join_household(phone_number: str, target_id: int) -> bool:
             if not cursor.fetchone():
                 return False
             conn.execute('''
-                INSERT INTO user_households (phone_number, household_id)
-                VALUES (?, ?)
-                ON CONFLICT(phone_number) DO UPDATE SET household_id = excluded.household_id
+                INSERT INTO user_households (phone_number, household_id, role)
+                VALUES (?, ?, 'MEMBER')
+                ON CONFLICT(phone_number) DO UPDATE SET
+                    household_id = excluded.household_id,
+                    role = 'MEMBER'
             ''', (phone_number, target_id))
             return True
     except sqlite3.Error as exc:
@@ -210,72 +265,11 @@ def join_household(phone_number: str, target_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Pantry CRUD
+# Grocery List CRUD  (shopping_list is the single source of truth)
 # ---------------------------------------------------------------------------
 
-def add_item(household_id: int, item_name: str) -> bool:
-    """Inserts a new item into the household pantry."""
-    try:
-        with _get_db() as conn:
-            conn.execute(
-                "INSERT INTO pantry_items (household_id, item_name) VALUES (?, ?)",
-                (household_id, item_name),
-            )
-        return True
-    except sqlite3.Error as exc:
-        logger.error("DB error adding item for household %d: %s", household_id, exc)
-        return False
-
-
-def get_inventory(household_id: int) -> list[str]:
-    """Returns all pantry items for a household, ordered by insertion time."""
-    try:
-        with _get_db() as conn:
-            cursor = conn.execute(
-                "SELECT item_name FROM pantry_items WHERE household_id = ? ORDER BY added_at ASC",
-                (household_id,),
-            )
-            return [row[0] for row in cursor.fetchall()]
-    except sqlite3.Error as exc:
-        logger.error("DB error retrieving inventory for household %d: %s", household_id, exc)
-        return []
-
-
-def clear_pantry(household_id: int) -> bool:
-    """Deletes all pantry items for a household."""
-    try:
-        with _get_db() as conn:
-            conn.execute(
-                "DELETE FROM pantry_items WHERE household_id = ?", (household_id,)
-            )
-        return True
-    except sqlite3.Error as exc:
-        logger.error("DB error clearing pantry for household %d: %s", household_id, exc)
-        return False
-
-
-def delete_item_by_name(household_id: int, item_name: str) -> bool:
-    """Removes a named item from a household's pantry."""
-    try:
-        with _get_db() as conn:
-            conn.execute(
-                "DELETE FROM pantry_items WHERE household_id = ? AND item_name = ?",
-                (household_id, item_name),
-            )
-        return True
-    except sqlite3.Error as exc:
-        logger.error(
-            "DB error deleting item '%s' for household %d: %s", item_name, household_id, exc
-        )
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Shopping List CRUD
-# ---------------------------------------------------------------------------
-
-def add_to_shopping_list(household_id: int, item_name: str) -> bool:
-    """Appends an item to the household shopping list."""
+def add_grocery_item(household_id: int, item_name: str) -> bool:
+    """Adds an item directly to the household grocery list."""
     try:
         with _get_db() as conn:
             conn.execute(
@@ -284,26 +278,44 @@ def add_to_shopping_list(household_id: int, item_name: str) -> bool:
             )
         return True
     except sqlite3.Error as exc:
-        logger.error("DB error adding to shopping list for household %d: %s", household_id, exc)
+        logger.error("DB error adding grocery item for household %d: %s", household_id, exc)
         return False
 
 
-def get_shopping_list(household_id: int) -> list[str]:
-    """Returns all items on the household shopping list."""
+def get_grocery_list(household_id: int) -> list[str]:
+    """Returns all items on the household grocery list, oldest first."""
     try:
         with _get_db() as conn:
             cursor = conn.execute(
-                "SELECT item_name FROM shopping_list WHERE household_id = ? ORDER BY added_at ASC",
+                "SELECT item_name FROM shopping_list "
+                "WHERE household_id = ? ORDER BY added_at ASC",
                 (household_id,),
             )
             return [row[0] for row in cursor.fetchall()]
     except sqlite3.Error as exc:
-        logger.error("DB error retrieving shopping list for household %d: %s", household_id, exc)
+        logger.error("DB error fetching grocery list for household %d: %s", household_id, exc)
         return []
 
 
-def clear_shopping_list(household_id: int) -> bool:
-    """Clears all items from the household shopping list."""
+def delete_grocery_item(household_id: int, item_name: str) -> bool:
+    """Removes a single item from the household grocery list by name."""
+    try:
+        with _get_db() as conn:
+            conn.execute(
+                "DELETE FROM shopping_list WHERE household_id = ? AND item_name = ?",
+                (household_id, item_name),
+            )
+        return True
+    except sqlite3.Error as exc:
+        logger.error(
+            "DB error deleting '%s' from grocery list for household %d: %s",
+            item_name, household_id, exc,
+        )
+        return False
+
+
+def clear_grocery_list(household_id: int) -> bool:
+    """Clears all items from the household grocery list."""
     try:
         with _get_db() as conn:
             conn.execute(
@@ -311,5 +323,5 @@ def clear_shopping_list(household_id: int) -> bool:
             )
         return True
     except sqlite3.Error as exc:
-        logger.error("DB error clearing shopping list for household %d: %s", household_id, exc)
+        logger.error("DB error clearing grocery list for household %d: %s", household_id, exc)
         return False
